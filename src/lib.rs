@@ -91,7 +91,7 @@ pub struct ListResult {
 }
 
 /// The metadata that describes an object.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectMeta {
     /// The full path to the object
     pub location: Path,
