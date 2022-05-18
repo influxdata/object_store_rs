@@ -8,6 +8,7 @@ unmaintained = "warn"
 notice = "warn"
 ignore = [
 ]
+git-fetch-with-cli = true
 
 [licenses]
 default = "allow"
