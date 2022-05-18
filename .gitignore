@@ -8,3 +8,4 @@
 **/.vscode
 massif.out.*
 valgrind-out.txt
+Cargo.lock
