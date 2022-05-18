@@ -160,10 +160,7 @@ impl ObjectStore for LocalFileSystem {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<ObjectMeta>>> {
+    async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         let root_path = match prefix {
             Some(prefix) => self.path_to_filesystem(prefix),
             None => self.root.to_path_buf(),

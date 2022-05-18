@@ -146,10 +146,7 @@ impl ObjectStore for MicrosoftAzure {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<ObjectMeta>>> {
+    async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         #[derive(Clone)]
         enum ListState {
             Start,
@@ -157,37 +154,39 @@ impl ObjectStore for MicrosoftAzure {
             Done,
         }
 
-        Ok(stream::unfold(ListState::Start, move |state| async move {
+        let prefix_raw = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
+        Ok(stream::unfold(ListState::Start, move |state| {
             let mut request = self.container_client.list_blobs();
 
-            let prefix_raw = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
-            if let Some(ref p) = prefix_raw {
-                request = request.prefix(p as &str);
+            if let Some(p) = prefix_raw.as_deref() {
+                request = request.prefix(p);
             }
 
-            match state {
-                ListState::HasMore(ref marker) => {
-                    request = request.next_marker(marker as &str);
+            async move {
+                match state {
+                    ListState::HasMore(ref marker) => {
+                        request = request.next_marker(marker as &str);
+                    }
+                    ListState::Done => {
+                        return None;
+                    }
+                    ListState::Start => {}
                 }
-                ListState::Done => {
-                    return None;
-                }
-                ListState::Start => {}
+
+                let resp = match request.execute().await.context(ListSnafu) {
+                    Ok(resp) => resp,
+                    Err(err) => return Some((Err(crate::Error::from(err)), state)),
+                };
+
+                let next_state = if let Some(marker) = resp.next_marker {
+                    ListState::HasMore(marker.as_str().to_string())
+                } else {
+                    ListState::Done
+                };
+
+                let names = resp.blobs.blobs.into_iter().map(convert_object_meta);
+                Some((Ok(futures::stream::iter(names)), next_state))
             }
-
-            let resp = match request.execute().await.context(ListSnafu) {
-                Ok(resp) => resp,
-                Err(err) => return Some((Err(crate::Error::from(err)), state)),
-            };
-
-            let next_state = if let Some(marker) = resp.next_marker {
-                ListState::HasMore(marker.as_str().to_string())
-            } else {
-                ListState::Done
-            };
-
-            let names = resp.blobs.blobs.into_iter().map(convert_object_meta);
-            Some((Ok(futures::stream::iter(names)), next_state))
         })
         .try_flatten()
         .boxed())

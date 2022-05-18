@@ -350,10 +350,7 @@ impl ObjectStore for AmazonS3 {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<ObjectMeta>>> {
+    async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         Ok(self
             .list_objects_v2(prefix, None)
             .await?

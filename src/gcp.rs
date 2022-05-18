@@ -200,10 +200,7 @@ impl ObjectStore for GoogleCloudStorage {
         Ok(())
     }
 
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<ObjectMeta>>> {
+    async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         let converted_prefix = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
         let list_request = cloud_storage::ListRequest {
             prefix: converted_prefix,

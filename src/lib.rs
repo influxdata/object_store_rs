@@ -63,10 +63,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// Prefixes are evaluated on a path segment basis, i.e. `foo/bar/` is a prefix of `foo/bar/x` but not of
     /// `foo/bar_baz/x`.
-    async fn list<'a>(
-        &'a self,
-        prefix: Option<&'a Path>,
-    ) -> Result<BoxStream<'a, Result<ObjectMeta>>>;
+    async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>>;
 
     /// List objects with the given prefix and an implementation specific
     /// delimiter. Returns common prefixes (directories) in addition to object
@@ -385,6 +382,22 @@ mod tests {
             // don't care if it errors, should fail elsewhere
             let _ = storage.delete(f).await;
         }
+    }
+
+    /// Test that the returned stream does not borrow the lifetime of Path
+    async fn list_store<'a>(
+        store: &'a dyn ObjectStore,
+        path_str: &str,
+    ) -> super::Result<BoxStream<'a, super::Result<ObjectMeta>>> {
+        let path = Path::from_raw(path_str);
+        store.list(Some(&path)).await
+    }
+
+    #[tokio::test]
+    async fn test_list_lifetimes() {
+        let store = memory::InMemory::new();
+        let stream = list_store(&store, "path").await.unwrap();
+        assert_eq!(stream.count().await, 0);
     }
 
     // Tests TODO:
