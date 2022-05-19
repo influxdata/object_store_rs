@@ -330,7 +330,6 @@ mod tests {
         },
         Error as ObjectStoreError, ObjectStore,
     };
-    use std::{fs::set_permissions, os::unix::prelude::PermissionsExt};
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -388,7 +387,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(target_family = "unix")]
     async fn bubble_up_io_errors() {
+        use std::{fs::set_permissions, os::unix::prelude::PermissionsExt};
+
         let root = TempDir::new().unwrap();
 
         // make non-readable
