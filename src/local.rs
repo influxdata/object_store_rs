@@ -80,9 +80,14 @@ pub(crate) enum Error {
         path: std::path::PathBuf,
     },
 
-    #[snafu(display("Unable to convert path to URL: {}", path.display()))]
+    #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
     InvalidPath {
         path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Unable to convert URL \"{}\" to filesystem path", url))]
+    InvalidUrl {
+        url: Url,
     },
 }
 
@@ -144,15 +149,13 @@ impl LocalFileSystem {
     }
 
     /// Return filesystem path of the given location
-    fn path_to_filesystem(&self, location: &Path) -> std::path::PathBuf {
+    fn path_to_filesystem(&self, location: &Path) -> Result<std::path::PathBuf> {
         // Workaround https://github.com/servo/rust-url/issues/769
-        let mut joined = self.root.clone();
-        joined.set_path(&format!("{}{}", joined.path(), location.to_raw()));
+        let mut url = self.root.clone();
+        url.set_path(&format!("{}{}", url.path(), location.to_raw()));
 
-        match joined.to_file_path() {
-            Ok(r) => r,
-            Err(_) => panic!("Failed to convert \"{}\" to filesystem path", joined),
-        }
+        url.to_file_path()
+            .map_err(|_| Error::InvalidUrl { url }.into())
     }
 
     fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
@@ -164,7 +167,7 @@ impl LocalFileSystem {
     }
 
     async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
-        let path = self.path_to_filesystem(location);
+        let path = self.path_to_filesystem(location)?;
 
         let file = fs::File::open(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -206,7 +209,7 @@ impl ObjectStore for LocalFileSystem {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         let content = bytes::BytesMut::from(&*bytes);
 
-        let path = self.path_to_filesystem(location);
+        let path = self.path_to_filesystem(location)?;
 
         let mut file = match fs::File::create(&path).await {
             Ok(f) => f,
@@ -252,7 +255,7 @@ impl ObjectStore for LocalFileSystem {
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let path = self.path_to_filesystem(location);
+        let path = self.path_to_filesystem(location)?;
         fs::remove_file(&path)
             .await
             .context(UnableToDeleteFileSnafu { path })?;
@@ -261,7 +264,7 @@ impl ObjectStore for LocalFileSystem {
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         let root_path = match prefix {
-            Some(prefix) => self.path_to_filesystem(prefix),
+            Some(prefix) => self.path_to_filesystem(prefix)?,
             None => self.root.to_file_path().unwrap(),
         };
 
@@ -287,7 +290,7 @@ impl ObjectStore for LocalFileSystem {
     }
 
     async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
-        let resolved_prefix = self.path_to_filesystem(prefix);
+        let resolved_prefix = self.path_to_filesystem(prefix)?;
 
         let walkdir = WalkDir::new(&resolved_prefix).min_depth(1).max_depth(1);
 
@@ -513,5 +516,21 @@ mod tests {
         let path = Path::from_raw(url.path());
 
         integration.head(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_root() {
+        let integration = LocalFileSystem::new();
+        let result = integration.list_with_delimiter(&Path::from_raw("/")).await;
+        if cfg!(target_family = "windows") {
+            let r = result.unwrap_err().to_string();
+            assert!(
+                r.contains("Unable to convert URL \"file:///\" to filesystem path"),
+                "{}",
+                r
+            );
+        } else {
+            result.unwrap();
+        }
     }
 }
