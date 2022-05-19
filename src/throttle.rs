@@ -8,7 +8,7 @@ use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt};
-use tokio::time::{sleep, Duration};
+use std::time::Duration;
 
 /// Configuration settings for throttled store
 #[derive(Debug, Default, Clone, Copy)]
@@ -74,6 +74,13 @@ pub struct ThrottleConfig {
     /// Sleeping is done before the underlying store is called and independently of the success of
     /// the operation.
     pub wait_put_per_call: Duration,
+}
+
+/// Sleep only if non-zero duration
+async fn sleep(duration: Duration) {
+    if !duration.is_zero() {
+        tokio::time::sleep(duration).await
+    }
 }
 
 /// Store wrapper that wraps an inner store with some `sleep` calls.
