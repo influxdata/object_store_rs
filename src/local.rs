@@ -139,13 +139,16 @@ impl LocalFileSystem {
     /// Create new filesystem storage with `prefix` applied to all paths
     pub fn new_with_prefix(prefix: impl AsRef<std::path::Path>) -> Result<Self> {
         Ok(Self {
-            root: path_to_url(prefix)?,
+            root: path_to_url(prefix, true)?,
         })
     }
 
     /// Return filesystem path of the given location
     fn path_to_filesystem(&self, location: &Path) -> std::path::PathBuf {
-        let joined = self.root.join(location.to_raw()).expect("valid path");
+        // Workaround https://github.com/servo/rust-url/issues/769
+        let mut joined = self.root.clone();
+        joined.set_path(&format!("{}{}", joined.path(), location.to_raw()));
+
         match joined.to_file_path() {
             Ok(r) => r,
             Err(_) => panic!("Failed to convert \"{}\" to filesystem path", joined),
@@ -153,7 +156,7 @@ impl LocalFileSystem {
     }
 
     fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
-        let url = path_to_url(location)?;
+        let url = path_to_url(location, false)?;
         let relative = self.root.make_relative(&url).expect("relative path");
 
         // TODO: This will double percent-encode
@@ -180,7 +183,7 @@ impl LocalFileSystem {
     }
 }
 
-fn path_to_url(path: impl AsRef<std::path::Path>) -> Result<Url, Error> {
+fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
     // Convert to canonical, i.e. absolute representation
     let canonical = path
         .as_ref()
@@ -190,7 +193,12 @@ fn path_to_url(path: impl AsRef<std::path::Path>) -> Result<Url, Error> {
         })?;
 
     // Convert to file URL
-    Url::from_directory_path(&canonical).map_err(|_| Error::InvalidPath { path: canonical })
+    let result = match is_dir {
+        true => Url::from_directory_path(&canonical),
+        false => Url::from_file_path(&canonical),
+    };
+
+    result.map_err(|_| Error::InvalidPath { path: canonical })
 }
 
 #[async_trait]
