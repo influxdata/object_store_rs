@@ -146,7 +146,10 @@ impl LocalFileSystem {
     /// Return filesystem path of the given location
     fn path_to_filesystem(&self, location: &Path) -> std::path::PathBuf {
         let joined = self.root.join(location.to_raw()).expect("valid path");
-        joined.to_file_path().expect("local file URL")
+        match joined.to_file_path() {
+            Ok(r) => r,
+            Err(_) => panic!("Failed to convert \"{}\" to filesystem path", joined),
+        }
     }
 
     fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
