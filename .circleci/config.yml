@@ -30,6 +30,9 @@
 
 version: 2.1
 
+orbs:
+  win: circleci/windows@4.1
+
 commands:
   rust_components:
     description: Verify installed components
@@ -193,6 +196,25 @@ jobs:
           command: cargo test --workspace --features=aws,azure,azure_test
       - cache_save
 
+  test_windows:
+    executor:
+      name: win/default
+      size: medium
+    environment:
+      # https://github.com/rust-lang/cargo/issues/10280
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - checkout
+      - run:
+          name: Download rustup
+          command: wget https://win.rustup.rs/x86_64 -O rustup-init.exe
+      - run:
+          name: Install rustup
+          command: .\rustup-init.exe -y --default-host=x86_64-pc-windows-msvc
+      - run:
+          name: Cargo test
+          command: cargo test --workspace
+
 workflows:
   version: 2
 
@@ -203,4 +225,5 @@ workflows:
       - lint
       - cargo_audit
       - test
+      - test_windows
       - doc
