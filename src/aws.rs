@@ -512,7 +512,8 @@ pub fn new_failing_s3() -> Result<AmazonS3> {
 
 /// S3 client bundled w/ a semaphore permit.
 #[derive(Clone)]
-struct SemaphoreClient {
+#[allow(missing_debug_implementations)]
+pub struct SemaphoreClient {
     /// Permit for this specific use of the client.
     ///
     /// Note that this field is never read and therefore considered "dead code" by rustc.
@@ -531,8 +532,8 @@ impl Deref for SemaphoreClient {
 }
 
 impl AmazonS3 {
-    /// Get a client according to the current connection limit.
-    async fn client(&self) -> SemaphoreClient {
+    /// Get a client once one is available under the connection limit.
+    pub async fn client(&self) -> SemaphoreClient {
         let permit = Arc::clone(&self.connection_semaphore)
             .acquire_owned()
             .await

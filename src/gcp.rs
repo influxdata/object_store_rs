@@ -105,6 +105,13 @@ pub struct GoogleCloudStorage {
     bucket_name: String,
 }
 
+impl GoogleCloudStorage {
+    /// Get the underlying client.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+}
+
 impl std::fmt::Display for GoogleCloudStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GoogleCloudStorage({})", self.bucket_name)

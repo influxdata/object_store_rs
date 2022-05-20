@@ -76,6 +76,13 @@ pub struct MicrosoftAzure {
     container_name: String,
 }
 
+impl MicrosoftAzure {
+    /// Get the underlying client.
+    pub fn client(&self) -> Arc<ContainerClient> {
+        Arc::clone(&self.container_client)
+    }
+}
+
 impl std::fmt::Display for MicrosoftAzure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MicrosoftAzure({})", self.container_name)
