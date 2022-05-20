@@ -1,6 +1,6 @@
 //! An object store implementation for S3
 use crate::{
-    path::{Path, DELIMITER},
+    path::{format_prefix, Path, DELIMITER},
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -366,9 +366,9 @@ impl ObjectStore for AmazonS3 {
             .boxed())
     }
 
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         Ok(self
-            .list_objects_v2(Some(prefix), Some(DELIMITER.to_string()))
+            .list_objects_v2(prefix, Some(DELIMITER.to_string()))
             .await?
             .try_fold(
                 ListResult {
@@ -556,12 +556,12 @@ impl AmazonS3 {
         }
         use ListState::*;
 
-        let raw_prefix = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
+        let prefix = format_prefix(prefix);
         let bucket = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::ListObjectsV2Request {
             bucket,
-            prefix: raw_prefix,
+            prefix,
             delimiter,
             ..Default::default()
         };
