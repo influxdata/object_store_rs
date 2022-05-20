@@ -1,8 +1,6 @@
 //! An object store implementation for Google Cloud Storage
-use crate::{
-    path::{Path, DELIMITER},
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
-};
+use crate::path::ParseError;
+use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result, DELIMITER};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cloud_storage::{Client, Object};
@@ -114,7 +112,6 @@ impl std::fmt::Display for GoogleCloudStorage {
 #[async_trait]
 impl ObjectStore for GoogleCloudStorage {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        let location = location.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         self.client
@@ -122,26 +119,25 @@ impl ObjectStore for GoogleCloudStorage {
             .create(
                 &bucket_name,
                 bytes.to_vec(),
-                location,
+                location.as_ref(),
                 "application/octet-stream",
             )
             .await
             .context(UnableToPutDataSnafu {
                 bucket: &self.bucket_name,
-                path: location,
+                path: location.to_string(),
             })?;
 
         Ok(())
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
-        let location = location.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         let bytes = self
             .client
             .object()
-            .download(&bucket_name, location)
+            .download(&bucket_name, location.as_ref())
             .await
             .map_err(|e| match e {
                 cloud_storage::Error::Other(ref text) if text.starts_with("No such object") => {
@@ -165,7 +161,7 @@ impl ObjectStore for GoogleCloudStorage {
         let object = self
             .client
             .object()
-            .read(&self.bucket_name, location.to_raw())
+            .read(&self.bucket_name, location.as_ref())
             .await
             .map_err(|e| match e {
                 cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
@@ -181,27 +177,26 @@ impl ObjectStore for GoogleCloudStorage {
                 },
             })?;
 
-        Ok(convert_object_meta(&object))
+        convert_object_meta(&object)
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let location = location.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         self.client
             .object()
-            .delete(&bucket_name, location)
+            .delete(&bucket_name, location.as_ref())
             .await
             .context(UnableToDeleteDataSnafu {
                 bucket: &self.bucket_name,
-                path: location,
+                path: location.to_string(),
             })?;
 
         Ok(())
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        let converted_prefix = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
+        let converted_prefix = prefix.map(|p| format!("{}{}", p, DELIMITER));
         let list_request = cloud_storage::ListRequest {
             prefix: converted_prefix,
             ..Default::default()
@@ -218,7 +213,7 @@ impl ObjectStore for GoogleCloudStorage {
         let bucket_name = self.bucket_name.clone();
         let objects = object_lists
             .map_ok(move |list| {
-                futures::stream::iter(list.items.into_iter().map(|o| Ok(convert_object_meta(&o))))
+                futures::stream::iter(list.items.into_iter().map(|o| convert_object_meta(&o)))
             })
             .map_err(move |source| {
                 crate::Error::from(Error::UnableToStreamListData {
@@ -259,13 +254,21 @@ impl ObjectStore for GoogleCloudStorage {
                     bucket: &self.bucket_name,
                 })?;
 
+                let objects = list_response
+                    .items
+                    .iter()
+                    .map(convert_object_meta)
+                    .collect::<Result<_>>()?;
+
+                let common_prefixes = list_response
+                    .prefixes
+                    .iter()
+                    .map(Path::parse)
+                    .collect::<Result<_, ParseError>>()?;
+
                 ListResult {
-                    objects: list_response
-                        .items
-                        .iter()
-                        .map(convert_object_meta)
-                        .collect(),
-                    common_prefixes: list_response.prefixes.iter().map(Path::from_raw).collect(),
+                    objects,
+                    common_prefixes,
                     next_token: list_response.next_page_token,
                 }
             }
@@ -275,16 +278,16 @@ impl ObjectStore for GoogleCloudStorage {
     }
 }
 
-fn convert_object_meta(object: &Object) -> ObjectMeta {
-    let location = Path::from_raw(&object.name);
+fn convert_object_meta(object: &Object) -> Result<ObjectMeta> {
+    let location = Path::parse(&object.name)?;
     let last_modified = object.updated;
     let size = usize::try_from(object.size).expect("unsupported size on this platform");
 
-    ObjectMeta {
+    Ok(ObjectMeta {
         location,
         last_modified,
         size,
-    }
+    })
 }
 
 /// Configure a connection to Google Cloud Storage.

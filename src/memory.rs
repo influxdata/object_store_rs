@@ -1,5 +1,5 @@
 //! An in-memory object store implementation
-use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
+use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
@@ -186,7 +186,7 @@ mod tests {
     async fn unknown_length() {
         let integration = InMemory::new();
 
-        let location = Path::from_raw("some_file");
+        let location = Path::from("some_file");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -209,7 +209,7 @@ mod tests {
     async fn nonexistent_location() {
         let integration = InMemory::new();
 
-        let location = Path::from_raw(NON_EXISTENT_NAME);
+        let location = Path::from(NON_EXISTENT_NAME);
 
         let err = get_nonexistent_object(&integration, Some(location))
             .await

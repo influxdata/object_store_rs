@@ -1,6 +1,5 @@
 //! An object store implementation for a local filesystem
-use crate::path::{Path, DELIMITER};
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Result};
+use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, PathPart, Result, DELIMITER};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{
@@ -71,6 +70,17 @@ pub(crate) enum Error {
     NotFound {
         path: String,
         source: io::Error,
+    },
+
+    #[snafu(display("Path \"{}\" contained non-unicode path segment", path.display()))]
+    NonUnicode {
+        path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Path \"{}\" contained bad path segment: \"{}\"", path.display(), segment))]
+    BadSegment {
+        path: std::path::PathBuf,
+        segment: String,
     },
 }
 
@@ -245,7 +255,7 @@ fn convert_metadata(metadata: std::fs::Metadata, location: Path) -> Result<Objec
         .into();
 
     let size = usize::try_from(metadata.len()).context(FileSizeOverflowedUsizeSnafu {
-        path: location.to_raw(),
+        path: location.as_ref(),
     })?;
 
     Ok(ObjectMeta {
@@ -286,18 +296,29 @@ impl LocalFileSystem {
     /// Return filesystem path of the given location
     fn path_to_filesystem(&self, location: &Path) -> std::path::PathBuf {
         let mut path = self.root.clone();
-        for component in location.to_raw().split(DELIMITER) {
+        for component in location.as_ref().split(DELIMITER) {
             path.push(component)
         }
         path.to_path_buf()
     }
 
-    fn filesystem_to_path(&self, location: &std::path::Path) -> Option<Path> {
-        let stripped = location.strip_prefix(&self.root).ok()?;
-        let path = stripped.to_string_lossy();
-        let split = path.split(std::path::MAIN_SEPARATOR);
+    fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
+        let stripped = location.strip_prefix(&self.root).expect("prefix");
+        let components = stripped
+            .components()
+            .map(|c| {
+                let segment = c.as_os_str().to_str().ok_or_else(|| Error::NonUnicode {
+                    path: stripped.to_path_buf(),
+                })?;
 
-        Some(Path::from_iter(split))
+                PathPart::parse(segment).map_err(|_| Error::BadSegment {
+                    path: stripped.to_path_buf(),
+                    segment: segment.to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        Ok(Path::from_iter(components))
     }
 
     async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
@@ -347,7 +368,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new(root.path());
 
-        let location = Path::from_raw("nested/file/test_file");
+        let location = Path::from("nested/file/test_file");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -369,7 +390,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new(root.path());
 
-        let location = Path::from_raw("some_file");
+        let location = Path::from("some_file");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -428,7 +449,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new(root.path());
 
-        let location = Path::from_raw(NON_EXISTENT_NAME);
+        let location = Path::from(NON_EXISTENT_NAME);
 
         let err = get_nonexistent_object(&integration, Some(location))
             .await

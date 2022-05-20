@@ -1,8 +1,6 @@
 //! An object store implementation for Azure blob storage
-use crate::{
-    path::{Path, DELIMITER},
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
-};
+use crate::path::ParseError;
+use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result, DELIMITER};
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
 use azure_storage::core::prelude::*;
@@ -85,12 +83,10 @@ impl std::fmt::Display for MicrosoftAzure {
 #[async_trait]
 impl ObjectStore for MicrosoftAzure {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        let location = location.to_raw();
-
         let bytes = bytes::BytesMut::from(&*bytes);
 
         self.container_client
-            .as_blob_client(location)
+            .as_blob_client(location.as_ref())
             .put_block_blob(bytes)
             .execute()
             .await
@@ -104,12 +100,12 @@ impl ObjectStore for MicrosoftAzure {
     async fn get(&self, location: &Path) -> Result<GetResult> {
         let blob = self
             .container_client
-            .as_blob_client(location.to_raw())
+            .as_blob_client(location.as_ref())
             .get()
             .execute()
             .await
             .context(GetSnafu {
-                path: location.to_raw(),
+                path: location.to_string(),
             })?;
 
         Ok(GetResult::Stream(
@@ -120,27 +116,26 @@ impl ObjectStore for MicrosoftAzure {
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
         let s = self
             .container_client
-            .as_blob_client(location.to_raw())
+            .as_blob_client(location.as_ref())
             .get_properties()
             .execute()
             .await
             .context(HeadSnafu {
-                path: location.to_raw(),
+                path: location.to_string(),
             })?;
 
         convert_object_meta(s.blob)
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let location = location.to_raw();
         self.container_client
-            .as_blob_client(location)
+            .as_blob_client(location.as_ref())
             .delete()
             .delete_snapshots_method(DeleteSnapshotsMethod::Include)
             .execute()
             .await
             .context(DeleteSnafu {
-                path: location.to_owned(),
+                path: location.to_string(),
             })?;
 
         Ok(())
@@ -154,7 +149,7 @@ impl ObjectStore for MicrosoftAzure {
             Done,
         }
 
-        let prefix_raw = prefix.map(|p| format!("{}{}", p.to_raw(), DELIMITER));
+        let prefix_raw = prefix.map(|p| format!("{}{}", p, DELIMITER));
         Ok(stream::unfold(ListState::Start, move |state| {
             let mut request = self.container_client.list_blobs();
 
@@ -204,16 +199,12 @@ impl ObjectStore for MicrosoftAzure {
 
         let next_token = resp.next_marker.as_ref().map(|m| m.as_str().to_string());
 
-        let common_prefixes = resp
-            .blobs
-            .blob_prefix
-            .map(|prefixes| {
-                prefixes
-                    .iter()
-                    .map(|prefix| Path::from_raw(&prefix.name))
-                    .collect()
-            })
-            .unwrap_or_else(Vec::new);
+        let prefixes = resp.blobs.blob_prefix.unwrap_or_default();
+
+        let common_prefixes = prefixes
+            .iter()
+            .map(|p| Path::parse(&p.name))
+            .collect::<Result<_, ParseError>>()?;
 
         let objects = resp
             .blobs
@@ -231,7 +222,7 @@ impl ObjectStore for MicrosoftAzure {
 }
 
 fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
-    let location = Path::from_raw(blob.name);
+    let location = Path::parse(blob.name)?;
     let last_modified = blob.properties.last_modified;
     let size = blob
         .properties

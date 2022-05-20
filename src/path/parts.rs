@@ -1,10 +1,15 @@
-use percent_encoding::{percent_decode_str, percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_decode, percent_encode, AsciiSet, CONTROLS};
 use std::borrow::Cow;
 
-use super::DELIMITER;
+use crate::DELIMITER_BYTE;
+use snafu::Snafu;
 
-// percent_encode's API needs this as a byte
-const DELIMITER_BYTE: u8 = DELIMITER.as_bytes()[0];
+#[derive(Debug, Snafu)]
+#[snafu(display("Invalid path segment: {}", segment))]
+#[allow(missing_copy_implementations)]
+pub struct InvalidPart {
+    pub segment: String,
+}
 
 /// The PathPart type exists to validate the directory/file names that form part
 /// of a path.
@@ -16,6 +21,23 @@ pub struct PathPart<'a> {
     pub(super) raw: Cow<'a, str>,
 }
 
+impl<'a> PathPart<'a> {
+    /// Parse the provided path segment as a [`PathPart`] returning an error if invalid
+    pub fn parse(segment: &'a str) -> Result<Self, InvalidPart> {
+        let decoded: Cow<'a, [u8]> = percent_decode(segment.as_bytes()).into();
+        let part = PathPart::from(decoded.as_ref());
+        if segment != part.as_ref() {
+            return Err(InvalidPart {
+                segment: segment.to_string(),
+            });
+        }
+
+        Ok(Self {
+            raw: segment.into(),
+        })
+    }
+}
+
 /// Characters we want to encode.
 const INVALID: &AsciiSet = &CONTROLS
     // The delimiter we are reserving for internal hierarchy
@@ -24,7 +46,6 @@ const INVALID: &AsciiSet = &CONTROLS
     // https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingMetadata.html
     .add(b'\\')
     .add(b'{')
-    // TODO: Non-printable ASCII characters (128–255 decimal characters)
     .add(b'^')
     .add(b'}')
     .add(b'%')
@@ -44,33 +65,36 @@ const INVALID: &AsciiSet = &CONTROLS
     .add(b'*')
     .add(b'?');
 
-impl<'a> From<&'a str> for PathPart<'a> {
-    fn from(v: &'a str) -> Self {
+impl<'a> From<&'a [u8]> for PathPart<'a> {
+    fn from(v: &'a [u8]) -> Self {
         let inner = match v {
             // We don't want to encode `.` generally, but we do want to disallow parts of paths
             // to be equal to `.` or `..` to prevent file system traversal shenanigans.
-            "." => "%2E".into(),
-            ".." => "%2E%2E".into(),
-            other => percent_encode(other.as_bytes(), INVALID).into(),
+            b"." => "%2E".into(),
+            b".." => "%2E%2E".into(),
+            other => percent_encode(other, INVALID).into(),
         };
         Self { raw: inner }
+    }
+}
+
+impl<'a> From<&'a str> for PathPart<'a> {
+    fn from(v: &'a str) -> Self {
+        Self::from(v.as_bytes())
     }
 }
 
 impl From<String> for PathPart<'static> {
     fn from(s: String) -> Self {
         Self {
-            raw: Cow::Owned(PathPart::from(s.as_ref()).raw.into_owned()),
+            raw: Cow::Owned(PathPart::from(s.as_str()).raw.into_owned()),
         }
     }
 }
 
-impl<'a> std::fmt::Display for PathPart<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        percent_decode_str(self.raw.as_ref())
-            .decode_utf8()
-            .expect("Valid UTF-8 that came from String")
-            .fmt(f)
+impl<'a> AsRef<str> for PathPart<'a> {
+    fn as_ref(&self) -> &str {
+        self.raw.as_ref()
     }
 }
 
@@ -82,27 +106,23 @@ mod tests {
     fn path_part_delimiter_gets_encoded() {
         let part: PathPart<'_> = "foo/bar".into();
         assert_eq!(part.raw, "foo%2Fbar");
-        assert_eq!(part.to_string(), "foo/bar")
     }
 
     #[test]
     fn path_part_given_already_encoded_string() {
         let part: PathPart<'_> = "foo%2Fbar".into();
         assert_eq!(part.raw, "foo%252Fbar");
-        assert_eq!(part.to_string(), "foo%2Fbar");
     }
 
     #[test]
     fn path_part_cant_be_one_dot() {
         let part: PathPart<'_> = ".".into();
         assert_eq!(part.raw, "%2E");
-        assert_eq!(part.to_string(), ".");
     }
 
     #[test]
     fn path_part_cant_be_two_dots() {
         let part: PathPart<'_> = "..".into();
         assert_eq!(part.raw, "%2E%2E");
-        assert_eq!(part.to_string(), "..");
     }
 }

@@ -30,16 +30,17 @@ pub mod azure;
 pub mod gcp;
 pub mod local;
 pub mod memory;
-pub mod path;
+mod path;
 pub mod throttle;
 
-use crate::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
+
+pub use path::*;
 
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
@@ -166,6 +167,12 @@ pub enum Error {
         path: String,
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+
+    #[snafu(
+        display("Encountered object with invalid path: {}", source),
+        context(false)
+    )]
+    InvalidPath { source: ParseError },
 }
 
 #[cfg(test)]
@@ -197,7 +204,7 @@ mod tests {
             content_list
         );
 
-        let location = Path::from_raw("test_dir/test_file.json");
+        let location = Path::from("test_dir/test_file.json");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -208,12 +215,12 @@ mod tests {
         assert_eq!(content_list, &[location.clone()]);
 
         // List everything starting with a prefix that should return results
-        let prefix = Path::from_raw("test_dir");
+        let prefix = Path::from("test_dir");
         let content_list = flatten_list_stream(storage, Some(&prefix)).await?;
         assert_eq!(content_list, &[location.clone()]);
 
         // List everything starting with a prefix that shouldn't return results
-        let prefix = Path::from_raw("something");
+        let prefix = Path::from("something");
         let content_list = flatten_list_stream(storage, Some(&prefix)).await?;
         assert!(content_list.is_empty());
 
@@ -245,6 +252,73 @@ mod tests {
             err
         );
 
+        // Test handling of paths containing an encoded delimiter
+
+        let file_with_delimiter = Path::from_iter(["a", "b/c", "foo.file"]);
+        storage
+            .put(&file_with_delimiter, Bytes::from("arbitrary"))
+            .await
+            .unwrap();
+
+        let files = flatten_list_stream(storage, None).await.unwrap();
+        assert_eq!(files, vec![file_with_delimiter.clone()]);
+
+        let files = flatten_list_stream(storage, Some(&Path::from("a/b")))
+            .await
+            .unwrap();
+        assert!(files.is_empty());
+
+        let files = storage
+            .list_with_delimiter(&Path::from("a/b"))
+            .await
+            .unwrap();
+        assert!(files.common_prefixes.is_empty());
+        assert!(files.objects.is_empty());
+
+        let files = storage.list_with_delimiter(&Path::from("a")).await.unwrap();
+        assert_eq!(files.common_prefixes, vec![Path::from_iter(["a", "b/c"])]);
+        assert!(files.objects.is_empty());
+
+        let files = storage
+            .list_with_delimiter(&Path::from_iter(["a", "b/c"]))
+            .await
+            .unwrap();
+        assert!(files.common_prefixes.is_empty());
+        assert_eq!(files.objects.len(), 1);
+        assert_eq!(files.objects[0].location, file_with_delimiter);
+
+        storage.delete(&file_with_delimiter).await.unwrap();
+
+        // Test handling of paths containing non-ASCII characters, e.g. emoji
+
+        let emoji_prefix = Path::from("🙀");
+        let emoji_file = Path::from("🙀/😀.parquet");
+        storage
+            .put(&emoji_file, Bytes::from("arbitrary"))
+            .await
+            .unwrap();
+
+        storage.head(&emoji_file).await.unwrap();
+        storage
+            .get(&emoji_file)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        let files = flatten_list_stream(storage, Some(&emoji_prefix))
+            .await
+            .unwrap();
+
+        assert_eq!(files, vec![emoji_file.clone()]);
+
+        storage.delete(&emoji_file).await.unwrap();
+        let files = flatten_list_stream(storage, Some(&emoji_prefix))
+            .await
+            .unwrap();
+        assert!(files.is_empty());
+
         Ok(())
     }
 
@@ -258,18 +332,18 @@ mod tests {
             content_list
         );
 
-        let location1 = Path::from_raw("foo/x.json");
-        let location2 = Path::from_raw("foo.bar/y.json");
+        let location1 = Path::from("foo/x.json");
+        let location2 = Path::from("foo.bar/y.json");
 
         let data = Bytes::from("arbitrary data");
         storage.put(&location1, data.clone()).await?;
         storage.put(&location2, data).await?;
 
-        let prefix = Path::from_raw("foo");
+        let prefix = Path::from("foo");
         let content_list = flatten_list_stream(storage, Some(&prefix)).await?;
         assert_eq!(content_list, &[location1.clone()]);
 
-        let prefix = Path::from_raw("foo/x");
+        let prefix = Path::from("foo/x");
         let content_list = flatten_list_stream(storage, Some(&prefix)).await?;
         assert_eq!(content_list, &[]);
 
@@ -297,7 +371,7 @@ mod tests {
             "mydb/data/whatevs",
         ]
         .iter()
-        .map(|&s| Path::from_raw(s))
+        .map(|&s| Path::from(s))
         .collect();
 
         for f in &files {
@@ -306,11 +380,11 @@ mod tests {
         }
 
         // ==================== check: prefix-list `mydb/wb` (directory) ====================
-        let prefix = Path::from_raw("mydb/wb");
+        let prefix = Path::from("mydb/wb");
 
-        let expected_000 = Path::from_raw("mydb/wb/000");
-        let expected_001 = Path::from_raw("mydb/wb/001");
-        let expected_location = Path::from_raw("mydb/wb/foo.json");
+        let expected_000 = Path::from("mydb/wb/000");
+        let expected_001 = Path::from("mydb/wb/001");
+        let expected_location = Path::from("mydb/wb/foo.json");
 
         let result = storage.list_with_delimiter(&prefix).await.unwrap();
 
@@ -323,14 +397,14 @@ mod tests {
         assert_eq!(object.size, data.len());
 
         // ==================== check: prefix-list `mydb/wb/000/000/001` (partial filename doesn't match) ====================
-        let prefix = Path::from_raw("mydb/wb/000/000/001");
+        let prefix = Path::from("mydb/wb/000/000/001");
 
         let result = storage.list_with_delimiter(&prefix).await.unwrap();
         assert!(result.common_prefixes.is_empty());
         assert_eq!(result.objects.len(), 0);
 
         // ==================== check: prefix-list `not_there` (non-existing prefix) ====================
-        let prefix = Path::from_raw("not_there");
+        let prefix = Path::from("not_there");
 
         let result = storage.list_with_delimiter(&prefix).await.unwrap();
         assert!(result.common_prefixes.is_empty());
@@ -352,7 +426,7 @@ mod tests {
         storage: &DynObjectStore,
         location: Option<Path>,
     ) -> Result<Vec<u8>> {
-        let location = location.unwrap_or_else(|| Path::from_raw("this_file_should_not_exist"));
+        let location = location.unwrap_or_else(|| Path::from("this_file_should_not_exist"));
 
         let err = storage.head(&location).await.unwrap_err();
         assert!(matches!(err, crate::Error::NotFound { .. }));
@@ -361,25 +435,9 @@ mod tests {
     }
 
     async fn delete_fixtures(storage: &DynObjectStore) {
-        let files: Vec<_> = [
-            "test_file",
-            "test_dir/test_file.json",
-            "mydb/wb/000/000/000.segment",
-            "mydb/wb/000/000/001.segment",
-            "mydb/wb/000/000/002.segment",
-            "mydb/wb/001/001/000.segment",
-            "mydb/wb/foo.json",
-            "mydb/data/whatevs",
-            "mydb/wbwbwb/111/222/333.segment",
-            "foo/x.json",
-            "foo.bar/y.json",
-        ]
-        .iter()
-        .map(|&s| Path::from_raw(s))
-        .collect();
+        let paths = flatten_list_stream(storage, None).await.unwrap();
 
-        for f in &files {
-            // don't care if it errors, should fail elsewhere
+        for f in &paths {
             let _ = storage.delete(f).await;
         }
     }
@@ -389,7 +447,7 @@ mod tests {
         store: &'a dyn ObjectStore,
         path_str: &str,
     ) -> super::Result<BoxStream<'a, super::Result<ObjectMeta>>> {
-        let path = Path::from_raw(path_str);
+        let path = Path::from(path_str);
         store.list(Some(&path)).await
     }
 
