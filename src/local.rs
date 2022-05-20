@@ -188,7 +188,7 @@ impl ObjectStore for LocalFileSystem {
                     Ok(entry @ Some(_)) => entry
                         .filter(|dir_entry| dir_entry.file_type().is_file())
                         .map(|entry| {
-                            let location = self.filesystem_to_path(entry.path()).unwrap();
+                            let location = self.filesystem_to_path(entry.path())?;
                             convert_entry(entry, location)
                         }),
                 }
@@ -208,7 +208,7 @@ impl ObjectStore for LocalFileSystem {
         for entry_res in walkdir.into_iter().map(convert_walkdir_result) {
             if let Some(entry) = entry_res? {
                 let is_directory = entry.file_type().is_dir();
-                let entry_location = self.filesystem_to_path(entry.path()).unwrap();
+                let entry_location = self.filesystem_to_path(entry.path())?;
 
                 let mut parts = match entry_location.prefix_match(prefix) {
                     Some(parts) => parts,
@@ -344,6 +344,7 @@ impl LocalFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::flatten_list_stream;
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
@@ -467,5 +468,53 @@ mod tests {
         } else {
             panic!("unexpected error type: {:?}", err);
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_path() {
+        let root = TempDir::new().unwrap();
+        let root = root.path().join("🙀");
+
+        // Invalid paths supported above root of store
+        let integration = LocalFileSystem::new(root.clone());
+
+        let directory = Path::from("directory");
+        let object = directory.child("child.txt");
+        integration
+            .put(&object, Bytes::from("arbitrary"))
+            .await
+            .unwrap();
+        integration.head(&object).await.unwrap();
+        integration.get(&object).await.unwrap();
+
+        flatten_list_stream(&integration, None).await.unwrap();
+        flatten_list_stream(&integration, Some(&directory))
+            .await
+            .unwrap();
+
+        let result = integration.list_with_delimiter(&directory).await.unwrap();
+        assert_eq!(result.objects.len(), 1);
+        assert!(result.common_prefixes.is_empty());
+        assert_eq!(result.objects[0].location, object);
+
+        let illegal = root.join("💀");
+        std::fs::write(illegal, "foo").unwrap();
+
+        // Can list directory that doesn't contain illegal path
+        flatten_list_stream(&integration, Some(&directory))
+            .await
+            .unwrap();
+
+        // Cannot list illegal file
+        let err = flatten_list_stream(&integration, None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("contained bad path segment: \"💀\""),
+            "{}",
+            err
+        );
     }
 }

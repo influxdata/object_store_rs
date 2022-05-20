@@ -176,16 +176,13 @@ pub enum Error {
 }
 
 #[cfg(test)]
-mod tests {
+mod test_util {
     use super::*;
 
-    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
-    type Result<T, E = Error> = std::result::Result<T, E>;
-
-    async fn flatten_list_stream(
+    pub async fn flatten_list_stream(
         storage: &DynObjectStore,
         prefix: Option<&Path>,
-    ) -> super::Result<Vec<Path>> {
+    ) -> Result<Vec<Path>> {
         storage
             .list(prefix)
             .await?
@@ -193,6 +190,15 @@ mod tests {
             .try_collect::<Vec<Path>>()
             .await
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::flatten_list_stream;
+
+    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+    type Result<T, E = Error> = std::result::Result<T, E>;
 
     pub(crate) async fn put_get_delete_list(storage: &DynObjectStore) -> Result<()> {
         delete_fixtures(storage).await;
