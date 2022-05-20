@@ -201,7 +201,7 @@ impl ObjectStore for AmazonS3 {
 
             rusoto_s3::PutObjectRequest {
                 bucket: bucket_name.clone(),
-                key: escape_object_key(location),
+                key: location.to_string(),
                 body: Some(byte_stream),
                 ..Default::default()
             }
@@ -227,7 +227,7 @@ impl ObjectStore for AmazonS3 {
         let key = location.to_string();
         let get_request = rusoto_s3::GetObjectRequest {
             bucket: self.bucket_name.clone(),
-            key: escape_object_key(location),
+            key: key.clone(),
             ..Default::default()
         };
         let bucket_name = self.bucket_name.clone();
@@ -269,7 +269,7 @@ impl ObjectStore for AmazonS3 {
         let key = location.to_string();
         let head_request = rusoto_s3::HeadObjectRequest {
             bucket: self.bucket_name.clone(),
-            key: escape_object_key(location),
+            key: key.clone(),
             ..Default::default()
         };
         let s = self
@@ -325,7 +325,7 @@ impl ObjectStore for AmazonS3 {
 
         let request_factory = move || rusoto_s3::DeleteObjectRequest {
             bucket: bucket_name.clone(),
-            key: escape_object_key(location),
+            key: location.to_string(),
             ..Default::default()
         };
 
@@ -413,12 +413,6 @@ fn convert_object_meta(object: rusoto_s3::Object, bucket: &str) -> Result<Object
         last_modified,
         size,
     })
-}
-
-/// Rusoto does not escape the path used to construct object requests
-fn escape_object_key(key: &Path) -> String {
-    // Path is already URL-safe, just need to escape the % characters
-    key.as_ref().replace('%', "%25")
 }
 
 /// Configure a connection to Amazon S3 using the specified credentials in
