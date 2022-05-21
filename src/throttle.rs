@@ -219,11 +219,15 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
     }
 
     async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        sleep(self.config().wait_delete_per_call).await;
+
+        self.inner.copy(source, dest).await
     }
 
     async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        sleep(self.config().wait_delete_per_call).await;
+
+        self.inner.rename_no_replace(source, dest).await
     }
 }
 
@@ -237,7 +241,10 @@ mod tests {
     use super::*;
     use crate::{
         memory::InMemory,
-        tests::{list_uses_directories_correctly, list_with_delimiter, put_get_delete_list},
+        tests::{
+            list_uses_directories_correctly, list_with_delimiter, put_get_delete_list,
+            rename_and_copy,
+        },
     };
     use bytes::Bytes;
     use futures::TryStreamExt;
@@ -268,6 +275,7 @@ mod tests {
         put_get_delete_list(&store).await.unwrap();
         list_uses_directories_correctly(&store).await.unwrap();
         list_with_delimiter(&store).await.unwrap();
+        rename_and_copy(&store).await.unwrap();
     }
 
     #[tokio::test]

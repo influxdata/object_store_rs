@@ -22,12 +22,19 @@ enum Error {
 
     #[snafu(display("Bad range"))]
     BadRange,
+
+    #[snafu(display("Object already exists at that location: {path}"))]
+    AlreadyExists { path: String },
 }
 
 impl From<Error> for super::Error {
     fn from(source: Error) -> Self {
         match source {
             Error::NoDataInMemory { ref path } => Self::NotFound {
+                path: path.into(),
+                source: source.into(),
+            },
+            Error::AlreadyExists { ref path } => Self::AlreadyExists {
                 path: path.into(),
                 source: source.into(),
             },
@@ -154,11 +161,23 @@ impl ObjectStore for InMemory {
     }
 
     async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        let data = self.get_bytes(source).await?;
+        self.storage.write().await.insert(dest.clone(), data);
+        Ok(())
     }
 
     async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        let data = self.get_bytes(source).await?;
+        let mut storage = self.storage.write().await;
+        if storage.contains_key(dest) {
+            return Err(Error::AlreadyExists {
+                path: dest.to_string(),
+            }
+            .into());
+        }
+        storage.insert(dest.clone(), data);
+        storage.remove(source);
+        Ok(())
     }
 }
 
@@ -197,7 +216,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -209,6 +228,7 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
     }
 
     #[tokio::test]
