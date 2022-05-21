@@ -113,17 +113,17 @@ enum Error {
     },
 
     #[snafu(display(
-        "Unable to copy object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
+        "Unable to copy object. Bucket: {}, From: {}, To: {}, Error: {}",
         bucket,
-        src,
-        dest,
+        from,
+        to,
         source,
     ))]
     UnableToCopyObject {
         source: rusoto_core::RusotoError<rusoto_s3::CopyObjectError>,
         bucket: String,
-        src: String,
-        dest: String,
+        from: String,
+        to: String,
     },
 
     #[snafu(display(
@@ -386,15 +386,15 @@ impl ObjectStore for AmazonS3 {
             .await?)
     }
 
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        let source = source.to_raw();
-        let dest = dest.to_raw();
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = from.to_raw();
+        let to = to.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::CopyObjectRequest {
             bucket: bucket_name.clone(),
-            copy_source: format!("{}/{}", &bucket_name, source),
-            key: dest.to_string(),
+            copy_source: format!("{}/{}", &bucket_name, from),
+            key: to.to_string(),
             ..Default::default()
         };
 
@@ -408,8 +408,8 @@ impl ObjectStore for AmazonS3 {
         .await
         .context(UnableToCopyObjectSnafu {
             bucket: &self.bucket_name,
-            src: source,
-            dest,
+            from,
+            to,
         })?;
 
         Ok(())
@@ -783,7 +783,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list, rename_and_copy
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };

@@ -80,31 +80,17 @@ enum Error {
     },
 
     #[snafu(display(
-        "Unable to copy object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
+        "Unable to copy object. Bucket: {}, From: {}, To: {}, Error: {}",
         bucket,
-        src,
-        dest,
+        from,
+        to,
         source,
     ))]
     UnableToCopyObject {
         source: cloud_storage::Error,
         bucket: String,
-        src: String,
-        dest: String,
-    },
-
-    #[snafu(display(
-        "Unable to rename object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
-        bucket,
-        src,
-        dest,
-        source,
-    ))]
-    UnableToRenameObject {
-        source: cloud_storage::Error,
-        bucket: String,
-        src: String,
-        dest: String,
+        from: String,
+        to: String,
     },
 
     NotFound {
@@ -316,39 +302,39 @@ impl ObjectStore for GoogleCloudStorage {
         Ok(result)
     }
 
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        let source = source.to_raw();
-        let dest = dest.to_raw();
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = from.to_raw();
+        let to = to.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         let source_obj = self
             .client
             .object()
-            .read(&bucket_name, source)
+            .read(&bucket_name, from)
             .await
             .map_err(|e| match e {
                 cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
                     Error::NotFound {
-                        path: source.to_string(),
+                        path: from.to_string(),
                         source: e,
                     }
                 }
                 _ => Error::UnableToCopyObject {
                     bucket: self.bucket_name.clone(),
-                    src: source.to_string(),
-                    dest: dest.to_string(),
+                    from: from.to_string(),
+                    to: to.to_string(),
                     source: e,
                 },
             })?;
         // TODO: Handle different buckets?
         self.client
             .object()
-            .copy(&source_obj, &bucket_name, dest)
+            .copy(&source_obj, &bucket_name, to)
             .await
             .context(UnableToCopyObjectSnafu {
                 bucket: self.bucket_name.clone(),
-                src: source.to_string(),
-                dest: dest.to_string(),
+                from: from.to_string(),
+                to: to.to_string(),
             })?;
 
         Ok(())

@@ -160,23 +160,23 @@ impl ObjectStore for InMemory {
         })
     }
 
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        let data = self.get_bytes(source).await?;
-        self.storage.write().await.insert(dest.clone(), data);
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let data = self.get_bytes(from).await?;
+        self.storage.write().await.insert(to.clone(), data);
         Ok(())
     }
 
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        let data = self.get_bytes(source).await?;
+    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+        let data = self.get_bytes(from).await?;
         let mut storage = self.storage.write().await;
-        if storage.contains_key(dest) {
+        if storage.contains_key(to) {
             return Err(Error::AlreadyExists {
-                path: dest.to_string(),
+                path: to.to_string(),
             }
             .into());
         }
-        storage.insert(dest.clone(), data);
-        storage.remove(source);
+        storage.insert(to.clone(), data);
+        storage.remove(from);
         Ok(())
     }
 }
@@ -216,7 +216,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list, rename_and_copy,
+            put_get_delete_list, rename_and_copy, rename_no_replace,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -229,6 +229,7 @@ mod tests {
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
+        rename_no_replace(&integration).await.unwrap();
     }
 
     #[tokio::test]

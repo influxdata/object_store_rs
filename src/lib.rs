@@ -85,7 +85,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Copy an object from one path to another in the same object store.
     ///
     /// If there exists an object at the destination, it will be overwritten.
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()>;
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()>;
 
     /// Move an object from one path to another in the same object store.
     ///
@@ -93,16 +93,16 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// check when deleting source that it was the same object that was originally copied.
     ///
     /// If there exists an object at the destination, it will be overwritten.
-    async fn rename(&self, source: &Path, dest: &Path) -> Result<()> {
-        self.copy(source, dest).await?;
-        self.delete(source).await?;
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        self.copy(from, to).await?;
+        self.delete(from).await?;
         Ok(())
     }
 
     /// Move an object from one path to another, only if destination is empty.
     ///
     /// Will return an error if the destination already has an object.
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()>;
+    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()>;
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a

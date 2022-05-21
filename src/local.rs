@@ -79,17 +79,17 @@ pub(crate) enum Error {
         actual: usize,
     },
 
-    #[snafu(display("Unable to copy file from {} to {}: {}", src.display(), dest.display(), source))]
+    #[snafu(display("Unable to copy file from {} to {}: {}", from.display(), to.display(), source))]
     UnableToCopyFile {
-        src: std::path::PathBuf,
-        dest: std::path::PathBuf,
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
         source: io::Error,
     },
 
-    #[snafu(display("Unable to rename file from {} to {}: {}", src.display(), dest.display(), source))]
+    #[snafu(display("Unable to rename file from {} to {}: {}", from.display(), to.display(), source))]
     UnableToRenameFile {
-        src: std::path::PathBuf,
-        dest: std::path::PathBuf,
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
         source: io::Error,
     },
 
@@ -437,41 +437,41 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        let source = self.config.path_to_filesystem(source)?;
-        let dest = self.config.path_to_filesystem(dest)?;
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
 
         maybe_spawn_blocking(move || {
-            std::fs::copy(&source, &dest).context(UnableToCopyFileSnafu { src: source, dest })?;
+            std::fs::copy(&from, &to).context(UnableToCopyFileSnafu { from, to })?;
             Ok(())
         })
         .await
     }
 
-    async fn rename(&self, source: &Path, dest: &Path) -> Result<()> {
-        let source = self.config.path_to_filesystem(source)?;
-        let dest = self.config.path_to_filesystem(dest)?;
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
         maybe_spawn_blocking(move || {
-            std::fs::rename(&source, &dest).context(UnableToCopyFileSnafu { src: source, dest })?;
+            std::fs::rename(&from, &to).context(UnableToCopyFileSnafu { from, to })?;
             Ok(())
         })
         .await
     }
 
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        let source = self.config.path_to_filesystem(source)?;
-        let dest = self.config.path_to_filesystem(dest)?;
+    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
 
         maybe_spawn_blocking(move || {
-            imp::rename_no_replace(&source, &dest).map_err(|err| match err.kind() {
+            imp::rename_no_replace(&from, &to).map_err(|err| match err.kind() {
                 io::ErrorKind::AlreadyExists => Error::AlreadyExists {
-                    path: dest.to_str().unwrap().to_string(),
+                    path: to.to_str().unwrap().to_string(),
                     source: err,
                 }
                 .into(),
                 _ => Error::UnableToRenameFile {
-                    src: source,
-                    dest,
+                    from,
+                    to,
                     source: err,
                 }
                 .into(),

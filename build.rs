@@ -6,10 +6,9 @@ mod platform_cfg {
         if ver.major >= 2 && ver.minor >= 28 {
             println!("cargo:rustc-cfg=glibc_renameat2");
         } else {
-            let more_info = "https://docs.rs/deltalake/latest/deltalake/storage/file/struct.FileStorageBackend.html";
             println!(
-                "cargo:warning=glibc version >= 2.28 is required for performing commits to local file system, glibc version found {}.{}. For more information: {}", 
-                ver.major, ver.minor, more_info
+                "cargo:warning=glibc version >= 2.28 is required for rename_no_replace on local file system, glibc version found {}.{}.", 
+                ver.major, ver.minor
             );
         }
     }
