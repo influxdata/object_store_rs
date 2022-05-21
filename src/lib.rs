@@ -612,7 +612,11 @@ mod tests {
         storage.put(&path1, contents1.clone()).await?;
         let result = storage.rename_no_replace(&path1, &path2).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::Error::AlreadyExists { .. }));
+        dbg!(&result);
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::AlreadyExists { .. }
+        ));
 
         // rename_noreplace() copies contents and deletes original
         storage.delete(&path2).await?;
