@@ -81,6 +81,28 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Prefixes are evaluated on a path segment basis, i.e. `foo/bar/` is a prefix of `foo/bar/x` but not of
     /// `foo/bar_baz/x`.
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult>;
+
+    /// Copy an object from one path to another in the same object store.
+    ///
+    /// If there exists an object at the destination, it will be overwritten.
+    async fn copy(&self, source: &Path, dest: &Path) -> Result<()>;
+
+    /// Move an object from one path to another in the same object store.
+    ///
+    /// By default, this is implemented as a copy and then delete source. It may not
+    /// check when deleting source that it was the same object that was originally copied.
+    ///
+    /// If there exists an object at the destination, it will be overwritten.
+    async fn rename(&self, source: &Path, dest: &Path) -> Result<()> {
+        self.copy(source, dest).await?;
+        self.delete(source).await?;
+        Ok(())
+    }
+
+    /// Move an object from one path to another, only if destination is empty.
+    ///
+    /// Will return an error if the destination already has an object.
+    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()>;
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a
@@ -233,6 +255,12 @@ pub enum Error {
 
     #[snafu(display("Operation not supported: {}", source))]
     NotSupported {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    #[snafu(display("Object at location {} already exists: {}", path, source))]
+    AlreadyExists {
+        path: String,
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 }

@@ -241,6 +241,14 @@ impl ObjectStore for MicrosoftAzure {
             objects,
         })
     }
+
+    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
+
+    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
 }
 
 fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {

@@ -152,6 +152,14 @@ impl ObjectStore for InMemory {
             next_token: None,
         })
     }
+
+    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
+
+    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
 }
 
 impl InMemory {

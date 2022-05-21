@@ -217,6 +217,14 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
             Err(err) => Err(err),
         }
     }
+
+    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
+
+    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+        todo!()
+    }
 }
 
 /// Saturated `usize` to `u32` cast.

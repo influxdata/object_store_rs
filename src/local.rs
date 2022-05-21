@@ -27,7 +27,9 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to walk dir: {}", source))]
-    UnableToWalkDir { source: walkdir::Error },
+    UnableToWalkDir {
+        source: walkdir::Error,
+    },
 
     #[snafu(display("Unable to access metadata for {}: {}", path, source))]
     UnableToAccessMetadata {
@@ -36,7 +38,9 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to copy data to file: {}", source))]
-    UnableToCopyDataToFile { source: io::Error },
+    UnableToCopyDataToFile {
+        source: io::Error,
+    },
 
     #[snafu(display("Unable to create dir {}: {}", path.display(), source))]
     UnableToCreateDir {
@@ -75,6 +79,20 @@ pub(crate) enum Error {
         actual: usize,
     },
 
+    #[snafu(display("Unable to copy file from {} to {}: {}", src.display(), dest.display(), source))]
+    UnableToCopyFile {
+        src: std::path::PathBuf,
+        dest: std::path::PathBuf,
+        source: io::Error,
+    },
+
+    #[snafu(display("Unable to rename file from {} to {}: {}", src.display(), dest.display(), source))]
+    UnableToRenameFile {
+        src: std::path::PathBuf,
+        dest: std::path::PathBuf,
+        source: io::Error,
+    },
+
     NotFound {
         path: std::path::PathBuf,
         source: io::Error,
@@ -99,10 +117,19 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
-    InvalidPath { path: std::path::PathBuf },
+    InvalidPath {
+        path: std::path::PathBuf,
+    },
 
     #[snafu(display("Unable to convert URL \"{}\" to filesystem path", url))]
-    InvalidUrl { url: Url },
+    InvalidUrl {
+        url: Url,
+    },
+
+    AlreadyExists {
+        path: String,
+        source: io::Error,
+    },
 }
 
 impl From<Error> for super::Error {
@@ -110,6 +137,10 @@ impl From<Error> for super::Error {
         match source {
             Error::NotFound { path, source } => Self::NotFound {
                 path: path.to_string_lossy().to_string(),
+                source: source.into(),
+            },
+            Error::AlreadyExists { path, source } => Self::AlreadyExists {
+                path,
                 source: source.into(),
             },
             _ => Self::Generic {
@@ -404,6 +435,120 @@ impl ObjectStore for LocalFileSystem {
             })
         })
         .await
+    }
+
+    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
+        let source = self.config.path_to_filesystem(source)?;
+        let dest = self.config.path_to_filesystem(dest)?;
+
+        maybe_spawn_blocking(move || {
+            std::fs::copy(&source, &dest).context(UnableToCopyFileSnafu { src: source, dest })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn rename(&self, source: &Path, dest: &Path) -> Result<()> {
+        let source = self.config.path_to_filesystem(source)?;
+        let dest = self.config.path_to_filesystem(dest)?;
+        maybe_spawn_blocking(move || {
+            std::fs::rename(&source, &dest).context(UnableToCopyFileSnafu { src: source, dest })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+        let source = self.config.path_to_filesystem(source)?;
+        let dest = self.config.path_to_filesystem(dest)?;
+        imp::rename_noreplace(&source, &dest).await?;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use std::sys::{c, cvt};
+
+    pub async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+        maybe_spawn_blocking(move || {
+            let old = maybe_verbatim(old)?;
+            let new = maybe_verbatim(new)?;
+            // TODO: test this
+            cvt(unsafe { c::MoveFileExW(old.as_ptr(), new.as_ptr(), 0x0) })?;
+            Ok(())
+        })
+        .await
+        .unwrap()
+    }
+}
+
+#[cfg(unix)]
+mod imp {
+    use super::*;
+    use std::{ffi::CString, path::PathBuf};
+
+    fn to_c_string(p: &PathBuf) -> Result<CString, io::Error> {
+        CString::new(p.to_str().unwrap())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
+    }
+
+    fn error_from_errno(from: CString, to: CString) -> super::super::Error {
+        let err = errno::errno();
+        match err.0 {
+            libc::EEXIST => Error::AlreadyExists {
+                path: to.to_str().unwrap().to_string(),
+                source: err.into(),
+            }
+            .into(),
+            _ => Error::UnableToRenameFile {
+                src: from.into_string().unwrap().into(),
+                dest: to.into_string().unwrap().into(),
+                source: err.into(),
+            }
+            .into(),
+        }
+    }
+
+    pub async fn rename_noreplace(from: &PathBuf, to: &PathBuf) -> Result<()> {
+        let cs_from = to_c_string(from).context(UnableToRenameFileSnafu {
+            src: &from,
+            dest: &to,
+        })?;
+        let cs_to = to_c_string(to).context(UnableToRenameFileSnafu {
+            src: &from,
+            dest: &to,
+        })?;
+
+        maybe_spawn_blocking(move || unsafe {
+            let ret = platform_specific_rename(cs_from.as_ptr(), cs_to.as_ptr());
+            if ret != 0 {
+                Err(error_from_errno(cs_from, cs_to))
+            } else {
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    #[allow(unused_variables)]
+    unsafe fn platform_specific_rename(from: *const libc::c_char, to: *const libc::c_char) -> i32 {
+        cfg_if::cfg_if! {
+            if #[cfg(all(target_os = "linux", target_env = "gnu"))] {
+                cfg_if::cfg_if! {
+                    if #[cfg(glibc_renameat2)] {
+                        libc::renameat2(libc::AT_FDCWD, from, libc::AT_FDCWD, to, libc::RENAME_NOREPLACE)
+                    } else {
+                        // target has old glibc (< 2.28), we would need to invoke syscall manually
+                        unimplemented!()
+                    }
+                }
+            } else if #[cfg(target_os = "macos")] {
+                libc::renamex_np(from, to, libc::RENAME_EXCL)
+            } else {
+                unimplemented!()
+            }
+        }
     }
 }
 
