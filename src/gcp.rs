@@ -79,7 +79,40 @@ enum Error {
         path: String,
     },
 
+    #[snafu(display(
+        "Unable to copy object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
+        bucket,
+        src,
+        dest,
+        source,
+    ))]
+    UnableToCopyObject {
+        source: cloud_storage::Error,
+        bucket: String,
+        src: String,
+        dest: String,
+    },
+
+    #[snafu(display(
+        "Unable to rename object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
+        bucket,
+        src,
+        dest,
+        source,
+    ))]
+    UnableToRenameObject {
+        source: cloud_storage::Error,
+        bucket: String,
+        src: String,
+        dest: String,
+    },
+
     NotFound {
+        path: String,
+        source: cloud_storage::Error,
+    },
+
+    AlreadyExists {
         path: String,
         source: cloud_storage::Error,
     },
@@ -284,11 +317,45 @@ impl ObjectStore for GoogleCloudStorage {
     }
 
     async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        let source = source.to_raw();
+        let dest = dest.to_raw();
+        let bucket_name = self.bucket_name.clone();
+
+        let source_obj = self
+            .client
+            .object()
+            .read(&bucket_name, source)
+            .await
+            .map_err(|e| match e {
+                cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
+                    Error::NotFound {
+                        path: source.to_string(),
+                        source: e,
+                    }
+                }
+                _ => Error::UnableToCopyObject {
+                    bucket: self.bucket_name.clone(),
+                    src: source.to_string(),
+                    dest: dest.to_string(),
+                    source: e,
+                },
+            })?;
+        // TODO: Handle different buckets?
+        self.client
+            .object()
+            .copy(&source_obj, &bucket_name, dest)
+            .await
+            .context(UnableToCopyObjectSnafu {
+                bucket: self.bucket_name.clone(),
+                src: source.to_string(),
+                dest: dest.to_string(),
+            })?;
+
+        Ok(())
     }
 
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+    async fn rename_no_replace(&self, _source: &Path, _dest: &Path) -> Result<()> {
+        todo!("cloud-storage crate doesn't yet support rewrite_object with precondition")
     }
 }
 
@@ -325,7 +392,7 @@ mod test {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -392,6 +459,7 @@ mod test {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
     }
 
     #[tokio::test]

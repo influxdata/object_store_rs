@@ -608,8 +608,22 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
 
+        // Clean up
+        storage.delete(&path2).await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn rename_no_replace(storage: &DynObjectStore) -> Result<()> {
+        // Create two objects
+        let path1 = Path::from_raw("test1");
+        let path2 = Path::from_raw("test2");
+        let contents1 = Bytes::from("cats");
+        let contents2 = Bytes::from("dogs");
+
         // rename_noreplace() errors if destination already exists
         storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
         let result = storage.rename_no_replace(&path1, &path2).await;
         assert!(result.is_err());
         dbg!(&result);
@@ -626,6 +640,9 @@ mod tests {
         let result = storage.get(&path1).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
+
+        // Clean up
+        storage.delete(&path2).await?;
 
         Ok(())
     }
