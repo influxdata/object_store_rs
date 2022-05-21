@@ -536,6 +536,7 @@ mod imp {
         to: *const libc::c_char,
     ) -> Result<(), io::Error> {
         cfg_if::cfg_if! {
+            // We only support linux with glibc (>= 2.28), which has renameat2
             if #[cfg(all(target_os = "linux", target_env = "gnu", glibc_renameat2))] {
                 let res = libc::renameat2(libc::AT_FDCWD, from, libc::AT_FDCWD, to, libc::RENAME_NOREPLACE);
             } else if #[cfg(target_os = "macos")] {
