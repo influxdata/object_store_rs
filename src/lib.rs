@@ -584,6 +584,48 @@ mod tests {
         Ok(storage.get(&location).await?.bytes().await?)
     }
 
+    pub(crate) async fn rename_and_copy(storage: &DynObjectStore) -> Result<()> {
+        // Create two objects
+        let path1 = Path::from_raw("test1");
+        let path2 = Path::from_raw("test2");
+        let contents1 = Bytes::from("cats");
+        let contents2 = Bytes::from("dogs");
+
+        // copy() make both objects identical
+        storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
+        storage.copy(&path1, &path2).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+
+        // rename() copies contents and deletes original
+        storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
+        storage.rename(&path1, &path2).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+        let result = storage.get(&path1).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
+
+        // rename_noreplace() errors if destination already exists
+        storage.put(&path1, contents1.clone()).await?;
+        let result = storage.rename_no_replace(&path1, &path2).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::AlreadyExists { .. }));
+
+        // rename_noreplace() copies contents and deletes original
+        storage.delete(&path2).await?;
+        storage.rename_no_replace(&path1, &path2).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+        let result = storage.get(&path1).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
+
+        Ok(())
+    }
+
     async fn delete_fixtures(storage: &DynObjectStore) {
         let paths = flatten_list_stream(storage, None).await.unwrap();
 

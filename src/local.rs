@@ -646,7 +646,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -660,6 +660,7 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
     }
 
     #[test]
