@@ -113,6 +113,20 @@ enum Error {
     },
 
     #[snafu(display(
+        "Unable to copy object. Bucket: {}, Source: {}, Dest: {}, Error: {}",
+        bucket,
+        src,
+        dest,
+        source,
+    ))]
+    UnableToCopyObject {
+        source: rusoto_core::RusotoError<rusoto_s3::CopyObjectError>,
+        bucket: String,
+        src: String,
+        dest: String,
+    },
+
+    #[snafu(display(
         "Unable to parse last modified date. Bucket: {}, Error: {} ({:?})",
         bucket,
         source,
@@ -373,11 +387,36 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+        let source = source.to_raw();
+        let dest = dest.to_raw();
+        let bucket_name = self.bucket_name.clone();
+
+        let request_factory = move || rusoto_s3::CopyObjectRequest {
+            bucket: bucket_name.clone(),
+            copy_source: format!("{}/{}", &bucket_name, source),
+            key: dest.to_string(),
+            ..Default::default()
+        };
+
+        let s3 = self.client().await;
+
+        s3_request(move || {
+            let (s3, request_factory) = (s3.clone(), request_factory.clone());
+
+            async move { s3.copy_object(request_factory()).await }
+        })
+        .await
+        .context(UnableToCopyObjectSnafu {
+            bucket: &self.bucket_name,
+            src: source,
+            dest,
+        })?;
+
+        Ok(())
     }
 
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
-        todo!()
+    async fn rename_no_replace(&self, _source: &Path, _dest: &Path) -> Result<()> {
+        todo!("Will require dynamodb_lock")
     }
 }
 
@@ -744,7 +783,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -859,6 +898,7 @@ mod tests {
         check_credentials(put_get_delete_list(&integration).await).unwrap();
         check_credentials(list_uses_directories_correctly(&integration).await).unwrap();
         check_credentials(list_with_delimiter(&integration).await).unwrap();
+        check_credentials(rename_and_copy(&integration).await).unwrap();
     }
 
     #[tokio::test]
