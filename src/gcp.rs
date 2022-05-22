@@ -19,7 +19,7 @@ use crate::{
     path::{Path, DELIMITER},
     token::TokenCache,
     util::format_prefix,
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+    GetResult, ListResult, MultiPartUpload, ObjectMeta, ObjectStore, Result,
 };
 
 #[derive(Debug, Snafu)]
@@ -376,6 +376,12 @@ impl GoogleCloudStorage {
 impl ObjectStore for GoogleCloudStorage {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         self.put_request(location, bytes).await
+    }
+
+    async fn upload(&self, _location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+        // TODO: cloud_storage does not provide any bindings for multi-part upload.
+        // But GCS does support this.
+        Err(super::Error::NotImplemented)
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {

@@ -1,4 +1,5 @@
 //! An object store implementation for a local filesystem
+use crate::MultiPartUpload;
 use crate::{
     maybe_spawn_blocking,
     path::{filesystem_path_to_url, Path},
@@ -6,14 +7,19 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::Future;
 use futures::{stream::BoxStream, StreamExt};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::{collections::BTreeSet, convert::TryFrom, io};
+use tokio::io::AsyncWrite;
+use tokio::task::JoinHandle;
 use url::Url;
 use walkdir::{DirEntry, WalkDir};
 
@@ -216,22 +222,7 @@ impl ObjectStore for LocalFileSystem {
         let path = self.config.path_to_filesystem(location)?;
 
         maybe_spawn_blocking(move || {
-            let mut file = match File::create(&path) {
-                Ok(f) => f,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let parent = path
-                        .parent()
-                        .context(UnableToCreateFileSnafu { path: &path, err })?;
-                    std::fs::create_dir_all(&parent)
-                        .context(UnableToCreateDirSnafu { path: parent })?;
-
-                    match File::create(&path) {
-                        Ok(f) => f,
-                        Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
-                    }
-                }
-                Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
-            };
+            let mut file = open_writable_file(&path)?;
 
             file.write_all(&bytes)
                 .context(UnableToCopyDataToFileSnafu)?;
@@ -239,6 +230,17 @@ impl ObjectStore for LocalFileSystem {
             Ok(())
         })
         .await
+    }
+
+    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+        let path = self.config.path_to_filesystem(location)?;
+
+        let file = open_writable_file(&path)?;
+
+        Ok(Box::new(LocalUpload {
+            state: LocalUploadState::Idle,
+            file: Arc::new(file),
+        }))
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -452,6 +454,82 @@ impl ObjectStore for LocalFileSystem {
     }
 }
 
+enum LocalUploadOperation {
+    Write,
+}
+
+enum LocalUploadState {
+    Idle,
+    Busy(JoinHandle<Result<LocalUploadOperation, io::Error>>),
+}
+
+struct LocalUpload {
+    state: LocalUploadState,
+    file: Arc<std::fs::File>,
+}
+
+#[async_trait]
+impl MultiPartUpload for LocalUpload {
+    async fn abort(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncWrite for LocalUpload {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        loop {
+            match &mut self.state {
+                LocalUploadState::Idle => {
+                    let file = Arc::clone(&self.file);
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(runtime) => {
+                            let data: Vec<u8> = buf.to_vec();
+                            self.state =
+                                LocalUploadState::Busy(runtime.spawn_blocking(move || {
+                                    (&*file).write_all(&data)?;
+                                    Ok(LocalUploadOperation::Write)
+                                }));
+                        }
+                        Err(_) => {
+                            (&*file).write_all(buf)?;
+                            return Poll::Ready(Ok(buf.len()));
+                        }
+                    }
+                }
+                LocalUploadState::Busy(handle) => {
+                    let op = match Pin::new(handle).poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(res) => res??,
+                    };
+                    match op {
+                        LocalUploadOperation::Write => {
+                            self.state = LocalUploadState::Idle;
+                            return Poll::Ready(Ok(buf.len()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        self.poll_flush(cx)
+    }
+}
+
 fn open_file(path: &std::path::PathBuf) -> Result<File> {
     let file = File::open(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -467,6 +545,32 @@ fn open_file(path: &std::path::PathBuf) -> Result<File> {
         }
     })?;
     Ok(file)
+}
+
+fn open_writable_file(path: &std::path::PathBuf) -> Result<File> {
+    match File::create(&path) {
+        Ok(f) => Ok(f),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .context(UnableToCreateFileSnafu { path: &path, err })?;
+            std::fs::create_dir_all(&parent).context(UnableToCreateDirSnafu { path: parent })?;
+
+            match File::create(&path) {
+                Ok(f) => Ok(f),
+                Err(err) => Err(Error::UnableToCreateFile {
+                    path: path.to_path_buf(),
+                    err,
+                }
+                .into()),
+            }
+        }
+        Err(err) => Err(Error::UnableToCreateFile {
+            path: path.to_path_buf(),
+            err,
+        }
+        .into()),
+    }
 }
 
 fn convert_entry(entry: DirEntry, location: Path) -> Result<ObjectMeta> {
@@ -525,7 +629,7 @@ mod tests {
     use crate::{
         tests::{
             copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
-            list_with_delimiter, put_get_delete_list, rename_and_copy,
+            list_with_delimiter, put_get_delete_list, rename_and_copy, stream_get,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -541,6 +645,7 @@ mod tests {
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
         copy_if_not_exists(&integration).await.unwrap();
+        stream_get(&integration).await.unwrap();
     }
 
     #[test]
@@ -551,6 +656,7 @@ mod tests {
             put_get_delete_list(&integration).await.unwrap();
             list_uses_directories_correctly(&integration).await.unwrap();
             list_with_delimiter(&integration).await.unwrap();
+            stream_get(&integration).await.unwrap();
         });
     }
 

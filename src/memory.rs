@@ -1,4 +1,5 @@
 //! An in-memory object store implementation
+use crate::MultiPartUpload;
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -8,7 +9,12 @@ use parking_lot::RwLock;
 use snafu::{ensure, OptionExt, Snafu};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io;
 use std::ops::Range;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
+use tokio::io::AsyncWrite;
 
 /// A specialized `Error` for in-memory object store-related errors
 #[derive(Debug, Snafu)]
@@ -50,7 +56,7 @@ impl From<Error> for super::Error {
 /// storage provider.
 #[derive(Debug, Default)]
 pub struct InMemory {
-    storage: RwLock<BTreeMap<Path, Bytes>>,
+    storage: Arc<RwLock<BTreeMap<Path, Bytes>>>,
 }
 
 impl std::fmt::Display for InMemory {
@@ -64,6 +70,14 @@ impl ObjectStore for InMemory {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         self.storage.write().insert(location.clone(), bytes);
         Ok(())
+    }
+
+    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+        Ok(Box::new(InMemoryUpload {
+            location: location.clone(),
+            data: Vec::new(),
+            storage: Arc::clone(&self.storage),
+        }))
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -191,7 +205,7 @@ impl InMemory {
         let storage = storage.clone();
 
         Self {
-            storage: RwLock::new(storage),
+            storage: Arc::new(RwLock::new(storage)),
         }
     }
 
@@ -207,6 +221,46 @@ impl InMemory {
     }
 }
 
+struct InMemoryUpload {
+    location: Path,
+    data: Vec<u8>,
+    storage: Arc<RwLock<BTreeMap<Path, Bytes>>>,
+}
+
+#[async_trait]
+impl MultiPartUpload for InMemoryUpload {
+    async fn abort(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncWrite for InMemoryUpload {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        self.data.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
+        let data = Bytes::from(std::mem::take(&mut self.data));
+        self.storage.write().insert(self.location.clone(), data);
+        Poll::Ready(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,7 +268,7 @@ mod tests {
     use crate::{
         tests::{
             copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
-            list_with_delimiter, put_get_delete_list, rename_and_copy,
+            list_with_delimiter, put_get_delete_list, rename_and_copy, stream_get,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -228,6 +282,7 @@ mod tests {
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
         copy_if_not_exists(&integration).await.unwrap();
+        stream_get(&integration).await.unwrap();
     }
 
     #[tokio::test]

@@ -39,6 +39,7 @@ mod oauth;
 #[cfg(feature = "gcp")]
 mod token;
 
+mod multipart;
 mod util;
 
 use crate::path::Path;
@@ -51,6 +52,7 @@ use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
+use tokio::io::AsyncWrite;
 
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
@@ -60,6 +62,9 @@ pub type DynObjectStore = dyn ObjectStore;
 pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Save the provided bytes to the specified location.
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()>;
+
+    /// Get a multi-part upload that allows writing data in chunks
+    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>>;
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;
@@ -138,6 +143,17 @@ pub struct ObjectMeta {
     pub last_modified: DateTime<Utc>,
     /// The size in bytes of the object
     pub size: usize,
+}
+
+/// Multi-part upload
+#[async_trait]
+pub trait MultiPartUpload: AsyncWrite + Unpin + Send {
+    /// Abort the multipart upload
+    ///
+    /// On some services, if you fail to call this and do not
+    /// close the sink, parts will linger in the object store
+    /// and will be billed.
+    async fn abort(&mut self) -> Result<()>;
 }
 
 /// Result for a get request
@@ -305,6 +321,7 @@ mod test_util {
 mod tests {
     use super::*;
     use crate::test_util::flatten_list_stream;
+    use tokio::io::AsyncWriteExt;
 
     type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
     type Result<T, E = Error> = std::result::Result<T, E>;
@@ -468,6 +485,42 @@ mod tests {
             .await
             .unwrap();
         assert!(files.is_empty());
+
+        Ok(())
+    }
+
+    fn get_byte_stream(chunk_length: usize, num_chunks: usize) -> Vec<Bytes> {
+        std::iter::repeat(Bytes::from_iter(std::iter::repeat(b'x').take(chunk_length)))
+            .take(num_chunks)
+            .collect()
+    }
+
+    pub(crate) async fn stream_get(storage: &DynObjectStore) -> Result<()> {
+        let location = Path::from("test_dir/test_upload_file.txt");
+
+        // Can write to storage
+        let data = get_byte_stream(5_000, 10);
+        let bytes_expected = data.concat();
+        let mut writer = storage.upload(&location).await?;
+        for chunk in data {
+            writer.write_all(&chunk).await?;
+        }
+        writer.shutdown().await?;
+        let bytes_written = storage.get(&location).await?.bytes().await?;
+        assert_eq!(bytes_expected, bytes_written);
+
+        // Can overwrite some storage
+        let data = get_byte_stream(5_000, 5);
+        let bytes_expected = data.concat();
+        let mut writer = storage.upload(&location).await?;
+        for chunk in data {
+            writer.write_all(&chunk).await?;
+        }
+        writer.shutdown().await?;
+        let bytes_written = storage.get(&location).await?.bytes().await?;
+        assert_eq!(bytes_expected, bytes_written);
+
+        // We can abort a write
 
         Ok(())
     }
