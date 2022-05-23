@@ -518,6 +518,11 @@ mod tests {
         let path = Path::from_raw(url.path());
 
         let roundtrip = integration.path_to_filesystem(&path).unwrap();
+
+        // Needed as on Windows canonicalize returns extended length path syntax
+        // C:\Users\circleci -> \\?\C:\Users\circleci
+        let roundtrip = roundtrip.canonicalize().unwrap();
+
         assert_eq!(roundtrip, canonical);
 
         integration.head(&path).await.unwrap();
