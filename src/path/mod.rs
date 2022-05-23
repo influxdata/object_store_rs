@@ -62,7 +62,7 @@ pub enum Error {
 /// using [`Path::from`] or [`Path::from_iter`].
 ///
 /// ```
-/// # use object_store::Path;
+/// # use object_store::path::Path;
 /// assert_eq!(Path::from("foo/bar").as_ref(), "foo/bar");
 /// assert_eq!(Path::from("foo//bar").as_ref(), "foo/bar");
 /// assert_eq!(Path::from("foo/../bar").as_ref(), "foo/%2E%2E/bar");
@@ -72,7 +72,7 @@ pub enum Error {
 /// Note: if provided with an already percent encoded string, this will encode it again
 ///
 /// ```
-/// # use object_store::Path;
+/// # use object_store::path::Path;
 /// assert_eq!(Path::from("foo/foo%2Fbar").as_ref(), "foo/foo%252Fbar");
 /// ```
 ///
@@ -83,7 +83,7 @@ pub enum Error {
 /// valid percent encoded sequences.
 ///
 /// ```
-/// # use object_store::Path;
+/// # use object_store::path::Path;
 ///
 /// assert_eq!(Path::parse("/foo/foo%2Fbar").unwrap().as_ref(), "foo/foo%2Fbar");
 /// Path::parse("..").unwrap_err();
