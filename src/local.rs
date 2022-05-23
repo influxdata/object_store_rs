@@ -1,5 +1,5 @@
 //! An object store implementation for a local filesystem
-use crate::path::{Path, DELIMITER};
+use crate::path::Path;
 use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -10,6 +10,7 @@ use futures::{
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{collections::BTreeSet, convert::TryFrom, io};
 use tokio::fs;
+use url::Url;
 use walkdir::{DirEntry, WalkDir};
 
 /// A specialized `Error` for filesystem object store-related errors
@@ -72,6 +73,22 @@ pub(crate) enum Error {
         path: String,
         source: io::Error,
     },
+
+    #[snafu(display("Unable to canonicalize path {}: {}", path.display(), source))]
+    UnableToCanonicalize {
+        source: io::Error,
+        path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
+    InvalidPath {
+        path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Unable to convert URL \"{}\" to filesystem path", url))]
+    InvalidUrl {
+        url: Url,
+    },
 }
 
 impl From<Error> for super::Error {
@@ -89,16 +106,83 @@ impl From<Error> for super::Error {
     }
 }
 
-/// Local filesystem storage suitable for testing or for opting out of using a
-/// cloud storage provider.
+/// Local filesystem storage providing an [`ObjectStore`] interface to files on
+/// local disk. Can optionally be created with a directory prefix
+///
+/// # Path Semantics
+///
+/// This implementation follows the [file URI] scheme outlined in [RFC 3986]. In
+/// particular paths are delimited by `/`
+///
+/// [file URI]: https://en.wikipedia.org/wiki/File_URI_scheme
+/// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
 #[derive(Debug)]
 pub struct LocalFileSystem {
-    root: std::path::PathBuf,
+    root: Url,
 }
 
 impl std::fmt::Display for LocalFileSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LocalFileSystem({})", self.root.display())
+        write!(f, "LocalFileSystem({})", self.root)
+    }
+}
+
+impl Default for LocalFileSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LocalFileSystem {
+    /// Create new filesystem storage with no prefix
+    pub fn new() -> Self {
+        Self {
+            root: Url::parse("file:///").unwrap(),
+        }
+    }
+
+    /// Create new filesystem storage with `prefix` applied to all paths
+    pub fn new_with_prefix(prefix: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self {
+            root: path_to_url(prefix, true)?,
+        })
+    }
+
+    /// Return filesystem path of the given location
+    fn path_to_filesystem(&self, location: &Path) -> Result<std::path::PathBuf> {
+        // Workaround https://github.com/servo/rust-url/issues/769
+        let mut url = self.root.clone();
+        url.set_path(&format!("{}{}", url.path(), location.to_raw()));
+
+        url.to_file_path()
+            .map_err(|_| Error::InvalidUrl { url }.into())
+    }
+
+    fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
+        let url = path_to_url(location, false)?;
+        let relative = self.root.make_relative(&url).expect("relative path");
+
+        // TODO: This will double percent-encode
+        Ok(Path::from_raw(relative))
+    }
+
+    async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
+        let path = self.path_to_filesystem(location)?;
+
+        let file = fs::File::open(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::NotFound {
+                    path: location.to_string(),
+                    source: e,
+                }
+            } else {
+                Error::UnableToOpenFile {
+                    path: path.clone(),
+                    source: e,
+                }
+            }
+        })?;
+        Ok((file, path))
     }
 }
 
@@ -107,7 +191,7 @@ impl ObjectStore for LocalFileSystem {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         let content = bytes::BytesMut::from(&*bytes);
 
-        let path = self.path_to_filesystem(location);
+        let path = self.path_to_filesystem(location)?;
 
         let mut file = match fs::File::create(&path).await {
             Ok(f) => f,
@@ -153,7 +237,7 @@ impl ObjectStore for LocalFileSystem {
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let path = self.path_to_filesystem(location);
+        let path = self.path_to_filesystem(location)?;
         fs::remove_file(&path)
             .await
             .context(UnableToDeleteFileSnafu { path })?;
@@ -162,8 +246,8 @@ impl ObjectStore for LocalFileSystem {
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         let root_path = match prefix {
-            Some(prefix) => self.path_to_filesystem(prefix),
-            None => self.root.to_path_buf(),
+            Some(prefix) => self.path_to_filesystem(prefix)?,
+            None => self.root.to_file_path().unwrap(),
         };
 
         let walkdir = WalkDir::new(&root_path)
@@ -178,7 +262,7 @@ impl ObjectStore for LocalFileSystem {
                     Ok(entry @ Some(_)) => entry
                         .filter(|dir_entry| dir_entry.file_type().is_file())
                         .map(|entry| {
-                            let location = self.filesystem_to_path(entry.path()).unwrap();
+                            let location = self.filesystem_to_path(entry.path())?;
                             convert_entry(entry, location)
                         }),
                 }
@@ -191,7 +275,7 @@ impl ObjectStore for LocalFileSystem {
         let root = Path::default();
         let prefix = prefix.unwrap_or(&root);
 
-        let resolved_prefix = self.path_to_filesystem(prefix);
+        let resolved_prefix = self.path_to_filesystem(prefix)?;
         let walkdir = WalkDir::new(&resolved_prefix).min_depth(1).max_depth(1);
 
         let mut common_prefixes = BTreeSet::new();
@@ -200,7 +284,7 @@ impl ObjectStore for LocalFileSystem {
         for entry_res in walkdir.into_iter().map(convert_walkdir_result) {
             if let Some(entry) = entry_res? {
                 let is_directory = entry.file_type().is_dir();
-                let entry_location = self.filesystem_to_path(entry.path()).unwrap();
+                let entry_location = self.filesystem_to_path(entry.path())?;
 
                 let mut parts = match entry_location.prefix_match(prefix) {
                     Some(parts) => parts,
@@ -228,6 +312,24 @@ impl ObjectStore for LocalFileSystem {
             objects,
         })
     }
+}
+
+fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
+    // Convert to canonical, i.e. absolute representation
+    let canonical = path
+        .as_ref()
+        .canonicalize()
+        .context(UnableToCanonicalizeSnafu {
+            path: path.as_ref(),
+        })?;
+
+    // Convert to file URL
+    let result = match is_dir {
+        true => Url::from_directory_path(&canonical),
+        false => Url::from_file_path(&canonical),
+    };
+
+    result.map_err(|_| Error::InvalidPath { path: canonical })
 }
 
 fn convert_entry(entry: DirEntry, location: Path) -> Result<ObjectMeta> {
@@ -279,49 +381,6 @@ fn convert_walkdir_result(
     }
 }
 
-impl LocalFileSystem {
-    /// Create new filesystem storage.
-    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    /// Return filesystem path of the given location
-    fn path_to_filesystem(&self, location: &Path) -> std::path::PathBuf {
-        let mut path = self.root.clone();
-        for component in location.to_raw().split(DELIMITER) {
-            path.push(component)
-        }
-        path.to_path_buf()
-    }
-
-    fn filesystem_to_path(&self, location: &std::path::Path) -> Option<Path> {
-        let stripped = location.strip_prefix(&self.root).ok()?;
-        let path = stripped.to_string_lossy();
-        let split = path.split(std::path::MAIN_SEPARATOR);
-
-        Some(Path::from_iter(split))
-    }
-
-    async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
-        let path = self.path_to_filesystem(location);
-
-        let file = fs::File::open(&path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::NotFound {
-                    path: location.to_string(),
-                    source: e,
-                }
-            } else {
-                Error::UnableToOpenFile {
-                    path: path.clone(),
-                    source: e,
-                }
-            }
-        })?;
-        Ok((file, path))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn file_test() {
         let root = TempDir::new().unwrap();
-        let integration = LocalFileSystem::new(root.path());
+        let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
@@ -347,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn creates_dir_if_not_present() {
         let root = TempDir::new().unwrap();
-        let integration = LocalFileSystem::new(root.path());
+        let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
         let location = Path::from_raw("nested/file/test_file");
 
@@ -369,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_length() {
         let root = TempDir::new().unwrap();
-        let integration = LocalFileSystem::new(root.path());
+        let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
         let location = Path::from_raw("some_file");
 
@@ -401,7 +460,7 @@ mod tests {
         permissions.set_mode(0o000);
         set_permissions(root.path(), permissions).unwrap();
 
-        let store = LocalFileSystem::new(root.path());
+        let store = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
         // `list` must fail
         match store.list(None).await {
@@ -428,7 +487,7 @@ mod tests {
     #[tokio::test]
     async fn get_nonexistent_location() {
         let root = TempDir::new().unwrap();
-        let integration = LocalFileSystem::new(root.path());
+        let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
         let location = Path::from_raw(NON_EXISTENT_NAME);
 
@@ -447,6 +506,41 @@ mod tests {
             assert_eq!(path, NON_EXISTENT_NAME);
         } else {
             panic!("unexpected error type: {:?}", err);
+        }
+    }
+
+    #[tokio::test]
+    async fn root() {
+        let integration = LocalFileSystem::new();
+
+        let canonical = std::path::Path::new("Cargo.toml").canonicalize().unwrap();
+        let url = Url::from_directory_path(&canonical).unwrap();
+        let path = Path::from_raw(url.path());
+
+        let roundtrip = integration.path_to_filesystem(&path).unwrap();
+
+        // Needed as on Windows canonicalize returns extended length path syntax
+        // C:\Users\circleci -> \\?\C:\Users\circleci
+        let roundtrip = roundtrip.canonicalize().unwrap();
+
+        assert_eq!(roundtrip, canonical);
+
+        integration.head(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_root() {
+        let integration = LocalFileSystem::new();
+        let result = integration.list_with_delimiter(None).await;
+        if cfg!(target_family = "windows") {
+            let r = result.unwrap_err().to_string();
+            assert!(
+                r.contains("Unable to convert URL \"file:///\" to filesystem path"),
+                "{}",
+                r
+            );
+        } else {
+            result.unwrap();
         }
     }
 }
