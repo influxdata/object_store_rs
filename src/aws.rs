@@ -194,18 +194,17 @@ impl fmt::Display for AmazonS3 {
 impl ObjectStore for AmazonS3 {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         let bucket_name = self.bucket_name.clone();
-        let key = location.to_raw();
         let request_factory = move || {
             let bytes = bytes.clone();
 
             let length = bytes.len();
-            let stream_data = std::io::Result::Ok(bytes);
+            let stream_data = Ok(bytes);
             let stream = futures::stream::once(async move { stream_data });
             let byte_stream = ByteStream::new_with_size(stream, length);
 
             rusoto_s3::PutObjectRequest {
                 bucket: bucket_name.clone(),
-                key: key.to_string(),
+                key: location.to_string(),
                 body: Some(byte_stream),
                 ..Default::default()
             }
@@ -221,14 +220,14 @@ impl ObjectStore for AmazonS3 {
         .await
         .context(UnableToPutDataSnafu {
             bucket: &self.bucket_name,
-            path: location.to_raw(),
+            path: location.as_ref(),
         })?;
 
         Ok(())
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
-        let key = location.to_raw().to_string();
+        let key = location.to_string();
         let get_request = rusoto_s3::GetObjectRequest {
             bucket: self.bucket_name.clone(),
             key: key.clone(),
@@ -270,7 +269,7 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        let key = location.to_raw().to_string();
+        let key = location.to_string();
         let head_request = rusoto_s3::HeadObjectRequest {
             bucket: self.bucket_name.clone(),
             key: key.clone(),
@@ -325,12 +324,11 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let key = location.to_raw();
         let bucket_name = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::DeleteObjectRequest {
             bucket: bucket_name.clone(),
-            key: key.to_string(),
+            key: location.to_string(),
             ..Default::default()
         };
 
@@ -344,7 +342,7 @@ impl ObjectStore for AmazonS3 {
         .await
         .context(UnableToDeleteDataSnafu {
             bucket: &self.bucket_name,
-            path: location.to_raw(),
+            path: location.as_ref(),
         })?;
 
         Ok(())
@@ -386,17 +384,13 @@ impl ObjectStore for AmazonS3 {
 
                     res.objects.append(&mut objects);
 
-                    res.common_prefixes.extend(
-                        list_objects_v2_result
-                            .common_prefixes
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|p| {
-                                Path::from_raw(
-                                    p.prefix.expect("can't have a prefix without a value"),
-                                )
-                            }),
-                    );
+                    let prefixes = list_objects_v2_result.common_prefixes.unwrap_or_default();
+                    res.common_prefixes.reserve(prefixes.len());
+
+                    for p in prefixes {
+                        let prefix = p.prefix.expect("can't have a prefix without a value");
+                        res.common_prefixes.push(Path::parse(prefix)?);
+                    }
 
                     Ok(res)
                 },
@@ -406,7 +400,8 @@ impl ObjectStore for AmazonS3 {
 }
 
 fn convert_object_meta(object: rusoto_s3::Object, bucket: &str) -> Result<ObjectMeta> {
-    let location = Path::from_raw(object.key.expect("object doesn't exist without a key"));
+    let key = object.key.expect("object doesn't exist without a key");
+    let location = Path::parse(key)?;
     let last_modified = match object.last_modified {
         Some(lm) => DateTime::parse_from_rfc3339(&lm)
             .context(UnableToParseLastModifiedSnafu { bucket })?

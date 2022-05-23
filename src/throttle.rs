@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result};
+use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt};
@@ -359,7 +359,7 @@ mod tests {
     }
 
     async fn place_test_object(store: &ThrottledStore<InMemory>, n_bytes: Option<usize>) -> Path {
-        let path = Path::from_raw("foo");
+        let path = Path::from("foo");
 
         if let Some(n_bytes) = n_bytes {
             let data: Vec<_> = std::iter::repeat(1u8).take(n_bytes).collect();
@@ -374,7 +374,7 @@ mod tests {
     }
 
     async fn place_test_objects(store: &ThrottledStore<InMemory>, n_entries: usize) -> Path {
-        let prefix = Path::from_raw("foo");
+        let prefix = Path::from("foo");
 
         // clean up store
         let entries: Vec<_> = store
@@ -464,7 +464,7 @@ mod tests {
         let bytes = Bytes::from(data);
 
         let t0 = Instant::now();
-        store.put(&Path::from_raw("foo"), bytes).await.unwrap();
+        store.put(&Path::from("foo"), bytes).await.unwrap();
 
         t0.elapsed()
     }

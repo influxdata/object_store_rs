@@ -1,12 +1,12 @@
 //! An object store implementation for a local filesystem
-use crate::path::Path;
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Result};
+use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{
     stream::{self, BoxStream},
     StreamExt,
 };
+use percent_encoding::percent_decode;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{collections::BTreeSet, convert::TryFrom, io};
 use tokio::fs;
@@ -72,6 +72,12 @@ pub(crate) enum Error {
     NotFound {
         path: String,
         source: io::Error,
+    },
+
+    #[snafu(display("Path \"{}\" contained non-unicode characters: {}", path, source))]
+    NonUnicode {
+        path: String,
+        source: std::str::Utf8Error,
     },
 
     #[snafu(display("Unable to canonicalize path {}: {}", path.display(), source))]
@@ -150,9 +156,10 @@ impl LocalFileSystem {
 
     /// Return filesystem path of the given location
     fn path_to_filesystem(&self, location: &Path) -> Result<std::path::PathBuf> {
-        // Workaround https://github.com/servo/rust-url/issues/769
         let mut url = self.root.clone();
-        url.set_path(&format!("{}{}", url.path(), location.to_raw()));
+        url.path_segments_mut()
+            .expect("url path")
+            .extend(location.parts());
 
         url.to_file_path()
             .map_err(|_| Error::InvalidUrl { url }.into())
@@ -162,8 +169,12 @@ impl LocalFileSystem {
         let url = path_to_url(location, false)?;
         let relative = self.root.make_relative(&url).expect("relative path");
 
-        // TODO: This will double percent-encode
-        Ok(Path::from_raw(relative))
+        // Reverse any percent encoding performed by conversion to URL
+        let decoded = percent_decode(relative.as_bytes())
+            .decode_utf8()
+            .context(NonUnicodeSnafu { path: &relative })?;
+
+        Ok(Path::parse(decoded)?)
     }
 
     async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
@@ -314,6 +325,9 @@ impl ObjectStore for LocalFileSystem {
     }
 }
 
+/// Encode a path as a URL
+///
+/// Note: The returned URL is percent encoded
 fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
     // Convert to canonical, i.e. absolute representation
     let canonical = path
@@ -349,7 +363,7 @@ fn convert_metadata(metadata: std::fs::Metadata, location: Path) -> Result<Objec
         .into();
 
     let size = usize::try_from(metadata.len()).context(FileSizeOverflowedUsizeSnafu {
-        path: location.to_raw(),
+        path: location.as_ref(),
     })?;
 
     Ok(ObjectMeta {
@@ -384,6 +398,7 @@ fn convert_walkdir_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::flatten_list_stream;
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
@@ -408,7 +423,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
-        let location = Path::from_raw("nested/file/test_file");
+        let location = Path::from("nested/file/test_file");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -430,7 +445,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
-        let location = Path::from_raw("some_file");
+        let location = Path::from("some_file");
 
         let data = Bytes::from("arbitrary data");
         let expected_data = data.clone();
@@ -489,7 +504,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
 
-        let location = Path::from_raw(NON_EXISTENT_NAME);
+        let location = Path::from(NON_EXISTENT_NAME);
 
         let err = get_nonexistent_object(&integration, Some(location))
             .await
@@ -515,7 +530,7 @@ mod tests {
 
         let canonical = std::path::Path::new("Cargo.toml").canonicalize().unwrap();
         let url = Url::from_directory_path(&canonical).unwrap();
-        let path = Path::from_raw(url.path());
+        let path = Path::parse(url.path()).unwrap();
 
         let roundtrip = integration.path_to_filesystem(&path).unwrap();
 
@@ -542,5 +557,56 @@ mod tests {
         } else {
             result.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_path() {
+        let root = TempDir::new().unwrap();
+        let root = root.path().join("🙀");
+        std::fs::create_dir(root.clone()).unwrap();
+
+        // Invalid paths supported above root of store
+        let integration = LocalFileSystem::new_with_prefix(root.clone()).unwrap();
+
+        let directory = Path::from("directory");
+        let object = directory.child("child.txt");
+        let data = Bytes::from("arbitrary");
+        integration.put(&object, data.clone()).await.unwrap();
+        integration.head(&object).await.unwrap();
+        let result = integration.get(&object).await.unwrap();
+        assert_eq!(result.bytes().await.unwrap(), data);
+
+        flatten_list_stream(&integration, None).await.unwrap();
+        flatten_list_stream(&integration, Some(&directory))
+            .await
+            .unwrap();
+
+        let result = integration
+            .list_with_delimiter(Some(&directory))
+            .await
+            .unwrap();
+        assert_eq!(result.objects.len(), 1);
+        assert!(result.common_prefixes.is_empty());
+        assert_eq!(result.objects[0].location, object);
+
+        let illegal = root.join("💀");
+        std::fs::write(illegal, "foo").unwrap();
+
+        // Can list directory that doesn't contain illegal path
+        flatten_list_stream(&integration, Some(&directory))
+            .await
+            .unwrap();
+
+        // Cannot list illegal file
+        let err = flatten_list_stream(&integration, None)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("Invalid path segment - got \"💀\" expected: \"%F0%9F%92%80\""),
+            "{}",
+            err
+        );
     }
 }
