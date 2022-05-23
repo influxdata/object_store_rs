@@ -271,9 +271,11 @@ impl ObjectStore for LocalFileSystem {
         Ok(stream::iter(s).boxed())
     }
 
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
-        let resolved_prefix = self.path_to_filesystem(prefix)?;
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
+        let root = Path::default();
+        let prefix = prefix.unwrap_or(&root);
 
+        let resolved_prefix = self.path_to_filesystem(prefix)?;
         let walkdir = WalkDir::new(&resolved_prefix).min_depth(1).max_depth(1);
 
         let mut common_prefixes = BTreeSet::new();
@@ -477,7 +479,7 @@ mod tests {
         }
 
         // `list_with_delimiter
-        assert!(store.list_with_delimiter(&Path::default()).await.is_err());
+        assert!(store.list_with_delimiter(None).await.is_err());
     }
 
     const NON_EXISTENT_NAME: &str = "nonexistentname";
@@ -524,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_root() {
         let integration = LocalFileSystem::new();
-        let result = integration.list_with_delimiter(&Path::from_raw("/")).await;
+        let result = integration.list_with_delimiter(None).await;
         if cfg!(target_family = "windows") {
             let r = result.unwrap_err().to_string();
             assert!(
