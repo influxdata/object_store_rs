@@ -8,8 +8,11 @@ use futures::{
 };
 use percent_encoding::percent_decode;
 use snafu::{OptionExt, ResultExt, Snafu};
+use std::io::SeekFrom;
+use std::ops::Range;
 use std::{collections::BTreeSet, convert::TryFrom, io};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use url::Url;
 use walkdir::{DirEntry, WalkDir};
 
@@ -82,6 +85,12 @@ pub(crate) enum Error {
 
     #[snafu(display("Unable to canonicalize path {}: {}", path.display(), source))]
     UnableToCanonicalize {
+        source: io::Error,
+        path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Error seeking file {}: {}", path.display(), source))]
+    Seek {
         source: io::Error,
         path: std::path::PathBuf,
     },
@@ -232,6 +241,25 @@ impl ObjectStore for LocalFileSystem {
     async fn get(&self, location: &Path) -> Result<GetResult> {
         let (file, path) = self.get_file(location).await?;
         Ok(GetResult::File(file, path))
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let (mut file, path) = self.get_file(location).await?;
+
+        let to_read = range.end - range.start;
+        let mut bytes = Vec::with_capacity(to_read);
+
+        file.seek(SeekFrom::Start(range.start as u64))
+            .await
+            .context(SeekSnafu { path: &path })?;
+
+        while bytes.len() != to_read {
+            file.read_buf(&mut bytes)
+                .await
+                .context(UnableToReadBytesSnafu { path: &path })?;
+        }
+
+        Ok(bytes.into())
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {

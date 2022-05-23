@@ -1,6 +1,7 @@
 //! An object store implementation for Azure blob storage
 use crate::{
-    path::{format_prefix, Path, DELIMITER},
+    path::{Path, DELIMITER},
+    util::format_prefix,
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -72,13 +73,16 @@ impl From<Error> for super::Error {
 #[derive(Debug)]
 pub struct MicrosoftAzure {
     container_client: Arc<ContainerClient>,
-    #[allow(dead_code)]
     container_name: String,
+    is_emulator: bool,
 }
 
 impl std::fmt::Display for MicrosoftAzure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MicrosoftAzure({})", self.container_name)
+        match self.is_emulator {
+            true => write!(f, "MicrosoftAzureEmulator({})", self.container_name),
+            false => write!(f, "MicrosoftAzure({})", self.container_name),
+        }
     }
 }
 
@@ -113,6 +117,21 @@ impl ObjectStore for MicrosoftAzure {
         Ok(GetResult::Stream(
             futures::stream::once(async move { Ok(blob.data) }).boxed(),
         ))
+    }
+
+    async fn get_range(&self, location: &Path, range: std::ops::Range<usize>) -> Result<Bytes> {
+        let blob = self
+            .container_client
+            .as_blob_client(location.as_ref())
+            .get()
+            .range(range)
+            .execute()
+            .await
+            .context(GetSnafu {
+                path: location.to_string(),
+            })?;
+
+        Ok(blob.data)
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
@@ -265,11 +284,14 @@ pub fn new_azure(
     let access_key = access_key.into();
     let http_client: Arc<dyn HttpClient> = Arc::new(reqwest::Client::new());
 
-    let storage_account_client = if use_emulator {
+    let (is_emulator, storage_account_client) = if use_emulator {
         check_if_emulator_works()?;
-        StorageAccountClient::new_emulator_default()
+        (true, StorageAccountClient::new_emulator_default())
     } else {
-        StorageAccountClient::new_access_key(Arc::clone(&http_client), &account, &access_key)
+        (
+            false,
+            StorageAccountClient::new_access_key(Arc::clone(&http_client), &account, &access_key),
+        )
     };
 
     let storage_client = storage_account_client.as_storage_client();
@@ -281,6 +303,7 @@ pub fn new_azure(
     Ok(MicrosoftAzure {
         container_client,
         container_name,
+        is_emulator,
     })
 }
 

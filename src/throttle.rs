@@ -1,4 +1,5 @@
 //! A throttling object store wrapper
+use std::ops::Range;
 use std::{
     convert::TryInto,
     sync::{Arc, Mutex},
@@ -159,6 +160,17 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
                 .boxed(),
             )
         })
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let config = self.config();
+
+        let sleep_duration = config.wait_delete_per_call
+            + config.wait_get_per_byte * (range.end - range.start) as u32;
+
+        sleep(sleep_duration).await;
+
+        self.inner.get_range(location, range).await
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {

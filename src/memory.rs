@@ -7,6 +7,7 @@ use futures::{stream::BoxStream, StreamExt};
 use snafu::{OptionExt, Snafu};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ops::Range;
 use tokio::sync::RwLock;
 
 /// A specialized `Error` for in-memory object store-related errors
@@ -55,6 +56,11 @@ impl ObjectStore for InMemory {
         Ok(GetResult::Stream(
             futures::stream::once(async move { Ok(data) }).boxed(),
         ))
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let data = self.get_bytes(location).await?;
+        Ok(data.slice(range))
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
