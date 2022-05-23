@@ -137,8 +137,8 @@ impl Path {
         prefix: &Self,
     ) -> Option<impl Iterator<Item = PathPart<'_>> + '_> {
         let diff = itertools::diff_with(
-            self.raw.split(DELIMITER),
-            prefix.raw.split(DELIMITER),
+            self.raw.split(DELIMITER).filter(|x| !x.is_empty()),
+            prefix.raw.split(DELIMITER).filter(|x| !x.is_empty()),
             |a, b| a == b,
         );
 
@@ -212,6 +212,14 @@ where
 
         Self { raw }
     }
+}
+
+/// Returns the prefix to be passed to an object store
+#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+pub(crate) fn format_prefix(prefix: Option<&Path>) -> Option<String> {
+    prefix
+        .filter(|x| !x.as_ref().is_empty())
+        .map(|p| format!("{}{}", p.as_ref(), DELIMITER))
 }
 
 #[cfg(test)]
@@ -354,6 +362,15 @@ mod tests {
         assert!(
             !haystack.prefix_matches(&needle),
             "{:?} should not have started with {:?}",
+            haystack,
+            needle
+        );
+
+        // empty prefix matches
+        let needle = Path::from("");
+        assert!(
+            haystack.prefix_matches(&needle),
+            "{:?} should have started with {:?}",
             haystack,
             needle
         );

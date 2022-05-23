@@ -94,7 +94,10 @@ impl ObjectStore for InMemory {
     /// The memory implementation returns all results, as opposed to the cloud
     /// versions which limit their results to 1k or more because of API
     /// limitations.
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
+        let root = Path::default();
+        let prefix = prefix.unwrap_or(&root);
+
         let mut common_prefixes = BTreeSet::new();
         let last_modified = Utc::now();
 

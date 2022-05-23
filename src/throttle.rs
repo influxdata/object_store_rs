@@ -193,7 +193,7 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         })
     }
 
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         sleep(self.config().wait_list_with_delimiter_per_call).await;
 
         match self.inner.list_with_delimiter(prefix).await {
@@ -454,7 +454,7 @@ mod tests {
         let prefix = place_test_objects(store, n_entries).await;
 
         let t0 = Instant::now();
-        store.list_with_delimiter(&prefix).await.unwrap();
+        store.list_with_delimiter(Some(&prefix)).await.unwrap();
 
         t0.elapsed()
     }

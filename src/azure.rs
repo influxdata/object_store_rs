@@ -1,6 +1,6 @@
 //! An object store implementation for Azure blob storage
 use crate::{
-    path::{Path, DELIMITER},
+    path::{format_prefix, Path, DELIMITER},
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -151,7 +151,8 @@ impl ObjectStore for MicrosoftAzure {
             Done,
         }
 
-        let prefix_raw = prefix.map(|p| format!("{}{}", p, DELIMITER));
+        let prefix_raw = format_prefix(prefix);
+
         Ok(stream::unfold(ListState::Start, move |state| {
             let mut request = self.container_client.list_blobs();
 
@@ -189,13 +190,13 @@ impl ObjectStore for MicrosoftAzure {
         .boxed())
     }
 
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         let mut request = self.container_client.list_blobs();
 
-        let prefix_raw = format!("{}{}", prefix, DELIMITER);
-
         request = request.delimiter(Delimiter::new(DELIMITER));
-        request = request.prefix(&*prefix_raw);
+        if let Some(prefix) = format_prefix(prefix) {
+            request = request.prefix(prefix)
+        }
 
         let resp = request.execute().await.context(ListSnafu)?;
 

@@ -71,7 +71,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// Prefixes are evaluated on a path segment basis, i.e. `foo/bar/` is a prefix of `foo/bar/x` but not of
     /// `foo/bar_baz/x`.
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult>;
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult>;
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a
@@ -215,9 +215,27 @@ mod tests {
         let expected_data = data.clone();
         storage.put(&location, data).await?;
 
+        let root = Path::from("/");
+
         // List everything
         let content_list = flatten_list_stream(storage, None).await?;
         assert_eq!(content_list, &[location.clone()]);
+
+        // Should behave the same as no prefix
+        let content_list = flatten_list_stream(storage, Some(&root)).await?;
+        assert_eq!(content_list, &[location.clone()]);
+
+        // List with delimiter
+        let result = storage.list_with_delimiter(None).await.unwrap();
+        assert!(result.objects.is_empty());
+        assert_eq!(result.common_prefixes.len(), 1);
+        assert_eq!(result.common_prefixes[0], Path::from("test_dir"));
+
+        // Should behave the same as no prefix
+        let result = storage.list_with_delimiter(Some(&root)).await.unwrap();
+        assert!(result.objects.is_empty());
+        assert_eq!(result.common_prefixes.len(), 1);
+        assert_eq!(result.common_prefixes[0], Path::from("test_dir"));
 
         // List everything starting with a prefix that should return results
         let prefix = Path::from("test_dir");
@@ -274,18 +292,21 @@ mod tests {
         assert!(files.is_empty());
 
         let files = storage
-            .list_with_delimiter(&Path::from("a/b"))
+            .list_with_delimiter(Some(&Path::from("a/b")))
             .await
             .unwrap();
         assert!(files.common_prefixes.is_empty());
         assert!(files.objects.is_empty());
 
-        let files = storage.list_with_delimiter(&Path::from("a")).await.unwrap();
+        let files = storage
+            .list_with_delimiter(Some(&Path::from("a")))
+            .await
+            .unwrap();
         assert_eq!(files.common_prefixes, vec![Path::from_iter(["a", "b/c"])]);
         assert!(files.objects.is_empty());
 
         let files = storage
-            .list_with_delimiter(&Path::from_iter(["a", "b/c"]))
+            .list_with_delimiter(Some(&Path::from_iter(["a", "b/c"])))
             .await
             .unwrap();
         assert!(files.common_prefixes.is_empty());
@@ -391,7 +412,7 @@ mod tests {
         let expected_001 = Path::from("mydb/wb/001");
         let expected_location = Path::from("mydb/wb/foo.json");
 
-        let result = storage.list_with_delimiter(&prefix).await.unwrap();
+        let result = storage.list_with_delimiter(Some(&prefix)).await.unwrap();
 
         assert_eq!(result.common_prefixes, vec![expected_000, expected_001]);
         assert_eq!(result.objects.len(), 1);
@@ -404,14 +425,14 @@ mod tests {
         // ==================== check: prefix-list `mydb/wb/000/000/001` (partial filename doesn't match) ====================
         let prefix = Path::from("mydb/wb/000/000/001");
 
-        let result = storage.list_with_delimiter(&prefix).await.unwrap();
+        let result = storage.list_with_delimiter(Some(&prefix)).await.unwrap();
         assert!(result.common_prefixes.is_empty());
         assert_eq!(result.objects.len(), 0);
 
         // ==================== check: prefix-list `not_there` (non-existing prefix) ====================
         let prefix = Path::from("not_there");
 
-        let result = storage.list_with_delimiter(&prefix).await.unwrap();
+        let result = storage.list_with_delimiter(Some(&prefix)).await.unwrap();
         assert!(result.common_prefixes.is_empty());
         assert!(result.objects.is_empty());
 

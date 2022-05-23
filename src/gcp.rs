@@ -1,6 +1,6 @@
 //! An object store implementation for Google Cloud Storage
 use crate::{
-    path::{Path, DELIMITER},
+    path::{format_prefix, Path, DELIMITER},
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -198,9 +198,8 @@ impl ObjectStore for GoogleCloudStorage {
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        let converted_prefix = prefix.map(|p| format!("{}{}", p, DELIMITER));
         let list_request = cloud_storage::ListRequest {
-            prefix: converted_prefix,
+            prefix: format_prefix(prefix),
             ..Default::default()
         };
         let object_lists = self
@@ -227,10 +226,9 @@ impl ObjectStore for GoogleCloudStorage {
         Ok(objects.try_flatten().boxed())
     }
 
-    async fn list_with_delimiter(&self, prefix: &Path) -> Result<ListResult> {
-        let converted_prefix = format!("{}{}", prefix, DELIMITER);
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
         let list_request = cloud_storage::ListRequest {
-            prefix: Some(converted_prefix),
+            prefix: format_prefix(prefix),
             delimiter: Some(DELIMITER.to_string()),
             ..Default::default()
         };
