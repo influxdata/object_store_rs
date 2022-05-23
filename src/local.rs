@@ -186,24 +186,6 @@ impl LocalFileSystem {
     }
 }
 
-fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
-    // Convert to canonical, i.e. absolute representation
-    let canonical = path
-        .as_ref()
-        .canonicalize()
-        .context(UnableToCanonicalizeSnafu {
-            path: path.as_ref(),
-        })?;
-
-    // Convert to file URL
-    let result = match is_dir {
-        true => Url::from_directory_path(&canonical),
-        false => Url::from_file_path(&canonical),
-    };
-
-    result.map_err(|_| Error::InvalidPath { path: canonical })
-}
-
 #[async_trait]
 impl ObjectStore for LocalFileSystem {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
@@ -328,6 +310,24 @@ impl ObjectStore for LocalFileSystem {
             objects,
         })
     }
+}
+
+fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
+    // Convert to canonical, i.e. absolute representation
+    let canonical = path
+        .as_ref()
+        .canonicalize()
+        .context(UnableToCanonicalizeSnafu {
+            path: path.as_ref(),
+        })?;
+
+    // Convert to file URL
+    let result = match is_dir {
+        true => Url::from_directory_path(&canonical),
+        false => Url::from_file_path(&canonical),
+    };
+
+    result.map_err(|_| Error::InvalidPath { path: canonical })
 }
 
 fn convert_entry(entry: DirEntry, location: Path) -> Result<ObjectMeta> {
@@ -512,8 +512,11 @@ mod tests {
         let integration = LocalFileSystem::new();
 
         let canonical = std::path::Path::new("Cargo.toml").canonicalize().unwrap();
-        let url = Url::from_directory_path(canonical).unwrap();
+        let url = Url::from_directory_path(&canonical).unwrap();
         let path = Path::from_raw(url.path());
+
+        let roundtrip = integration.path_to_filesystem(&path).unwrap();
+        assert_eq!(roundtrip, canonical);
 
         integration.head(&path).await.unwrap();
     }
