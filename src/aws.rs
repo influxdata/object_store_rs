@@ -1,5 +1,8 @@
 //! An object store implementation for S3
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result, DELIMITER};
+use crate::{
+    path::{Path, DELIMITER},
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};

@@ -1,6 +1,8 @@
 //! An object store implementation for Google Cloud Storage
-use crate::path::ParseError;
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result, DELIMITER};
+use crate::{
+    path::{Path, DELIMITER},
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cloud_storage::{Client, Object};
@@ -264,7 +266,7 @@ impl ObjectStore for GoogleCloudStorage {
                     .prefixes
                     .iter()
                     .map(Path::parse)
-                    .collect::<Result<_, ParseError>>()?;
+                    .collect::<Result<_, _>>()?;
 
                 ListResult {
                     objects,

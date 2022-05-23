@@ -1,5 +1,8 @@
 //! An object store implementation for a local filesystem
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, PathPart, Result, DELIMITER};
+use crate::{
+    path::{Path, PathPart, DELIMITER},
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{
@@ -77,10 +80,10 @@ pub(crate) enum Error {
         path: std::path::PathBuf,
     },
 
-    #[snafu(display("Path \"{}\" contained bad path segment: \"{}\"", path.display(), segment))]
+    #[snafu(display("Path \"{}\" contained bad path segment: {}", path.display(), source))]
     BadSegment {
         path: std::path::PathBuf,
-        segment: String,
+        source: crate::path::InvalidPart,
     },
 }
 
@@ -311,9 +314,9 @@ impl LocalFileSystem {
                     path: stripped.to_path_buf(),
                 })?;
 
-                PathPart::parse(segment).map_err(|_| Error::BadSegment {
+                PathPart::parse(segment).map_err(|e| Error::BadSegment {
                     path: stripped.to_path_buf(),
-                    segment: segment.to_string(),
+                    source: e,
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -480,12 +483,11 @@ mod tests {
 
         let directory = Path::from("directory");
         let object = directory.child("child.txt");
-        integration
-            .put(&object, Bytes::from("arbitrary"))
-            .await
-            .unwrap();
+        let data = Bytes::from("arbitrary");
+        integration.put(&object, data.clone()).await.unwrap();
         integration.head(&object).await.unwrap();
-        integration.get(&object).await.unwrap();
+        let result = integration.get(&object).await.unwrap();
+        assert_eq!(result.bytes().await.unwrap(), data);
 
         flatten_list_stream(&integration, None).await.unwrap();
         flatten_list_stream(&integration, Some(&directory))
@@ -512,7 +514,7 @@ mod tests {
             .to_string();
 
         assert!(
-            err.contains("contained bad path segment: \"💀\""),
+            err.contains("contained bad path segment - got \"💀\" expected: \"%F0%9F%92%80\""),
             "{}",
             err
         );

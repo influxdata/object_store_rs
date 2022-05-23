@@ -12,19 +12,17 @@ pub const DELIMITER_BYTE: u8 = DELIMITER.as_bytes()[0];
 
 mod parts;
 
-pub use parts::PathPart;
+pub use parts::{InvalidPart, PathPart};
 
+/// Error returned by [`Path::parse`]
 #[derive(Debug, Snafu)]
 #[allow(missing_docs)]
-pub enum ParseError {
+pub enum Error {
     #[snafu(display("Path \"{}\" contained empty path segment", path))]
     EmptySegment { path: String },
 
     #[snafu(display("Error parsing Path \"{}\": \"{}\"", path, source))]
-    BadSegment {
-        path: String,
-        source: parts::InvalidPart,
-    },
+    BadSegment { path: String, source: InvalidPart },
 }
 
 /// A parsed path representation that can be safely written to object storage
@@ -51,9 +49,10 @@ pub enum ParseError {
 ///
 /// * Paths are delimited by `/`
 /// * Paths do not start with a `/`
-/// * Empty path segments are discarded
+/// * Empty path segments are discarded (e.g. `//` is treated as though it were `/`)
 /// * Relative path segments, i.e. `.` and `..` are percent encoded
 /// * Unsafe characters are percent encoded, as described by [RFC 1738]
+/// * All paths are relative to the root of the object store
 ///
 /// In order to provide these guarantees there are two ways to safely construct a [`Path`]
 ///
@@ -101,10 +100,11 @@ pub struct Path {
 }
 
 impl Path {
-    /// Parse a string as a [`Path`], returning a [`ParseError`] if invalid
+    /// Parse a string as a [`Path`], returning a [`Error`] if invalid,
+    /// as defined on the docstring for [`Path`]
     ///
     /// Note: this will strip any leading `/` or trailing `/`
-    pub fn parse(path: impl AsRef<str>) -> Result<Self, ParseError> {
+    pub fn parse(path: impl AsRef<str>) -> Result<Self, Error> {
         let path = path.as_ref();
 
         let stripped = path.strip_prefix(DELIMITER).unwrap_or(path);

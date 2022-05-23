@@ -1,14 +1,16 @@
 use percent_encoding::{percent_decode, percent_encode, AsciiSet, CONTROLS};
 use std::borrow::Cow;
 
-use crate::DELIMITER_BYTE;
+use crate::path::DELIMITER_BYTE;
 use snafu::Snafu;
 
+/// Error returned by [`PathPart::parse`]
 #[derive(Debug, Snafu)]
-#[snafu(display("Invalid path segment: {}", segment))]
+#[snafu(display("Invalid path segment - got \"{}\" expected: \"{}\"", actual, expected))]
 #[allow(missing_copy_implementations)]
 pub struct InvalidPart {
-    pub segment: String,
+    actual: String,
+    expected: String,
 }
 
 /// The PathPart type exists to validate the directory/file names that form part
@@ -28,7 +30,8 @@ impl<'a> PathPart<'a> {
         let part = PathPart::from(decoded.as_ref());
         if segment != part.as_ref() {
             return Err(InvalidPart {
-                segment: segment.to_string(),
+                actual: segment.to_string(),
+                expected: part.raw.to_string(),
             });
         }
 

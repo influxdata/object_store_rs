@@ -1,5 +1,5 @@
 //! An in-memory object store implementation
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result};
+use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;

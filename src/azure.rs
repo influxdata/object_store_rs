@@ -1,6 +1,8 @@
 //! An object store implementation for Azure blob storage
-use crate::path::ParseError;
-use crate::{GetResult, ListResult, ObjectMeta, ObjectStore, Path, Result, DELIMITER};
+use crate::{
+    path::{Path, DELIMITER},
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+};
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
 use azure_storage::core::prelude::*;
@@ -204,7 +206,7 @@ impl ObjectStore for MicrosoftAzure {
         let common_prefixes = prefixes
             .iter()
             .map(|p| Path::parse(&p.name))
-            .collect::<Result<_, ParseError>>()?;
+            .collect::<Result<_, _>>()?;
 
         let objects = resp
             .blobs

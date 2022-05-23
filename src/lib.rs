@@ -30,17 +30,16 @@ pub mod azure;
 pub mod gcp;
 pub mod local;
 pub mod memory;
-mod path;
+pub mod path;
 pub mod throttle;
 
+use crate::path::Path;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
-
-pub use path::*;
 
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
@@ -172,7 +171,7 @@ pub enum Error {
         display("Encountered object with invalid path: {}", source),
         context(false)
     )]
-    InvalidPath { source: ParseError },
+    InvalidPath { source: path::Error },
 }
 
 #[cfg(test)]
