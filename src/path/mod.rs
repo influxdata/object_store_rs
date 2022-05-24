@@ -214,14 +214,6 @@ where
     }
 }
 
-/// Returns the prefix to be passed to an object store
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
-pub(crate) fn format_prefix(prefix: Option<&Path>) -> Option<String> {
-    prefix
-        .filter(|x| !x.as_ref().is_empty())
-        .map(|p| format!("{}{}", p.as_ref(), DELIMITER))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

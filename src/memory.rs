@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{stream::BoxStream, StreamExt};
-use snafu::{OptionExt, Snafu};
+use snafu::{ensure, OptionExt, Snafu};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ops::Range;
 use tokio::sync::RwLock;
 
 /// A specialized `Error` for in-memory object store-related errors
@@ -15,6 +16,12 @@ use tokio::sync::RwLock;
 enum Error {
     #[snafu(display("No data in memory found. Location: {path}"))]
     NoDataInMemory { path: String },
+
+    #[snafu(display("Out of range"))]
+    OutOfRange,
+
+    #[snafu(display("Bad range"))]
+    BadRange,
 }
 
 impl From<Error> for super::Error {
@@ -24,7 +31,10 @@ impl From<Error> for super::Error {
                 path: path.into(),
                 source: source.into(),
             },
-            // currently "not found" is the only error that can happen with the in-memory store
+            _ => Self::Generic {
+                store: "InMemory",
+                source: Box::new(source),
+            },
         }
     }
 }
@@ -55,6 +65,14 @@ impl ObjectStore for InMemory {
         Ok(GetResult::Stream(
             futures::stream::once(async move { Ok(data) }).boxed(),
         ))
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let data = self.get_bytes(location).await?;
+        ensure!(range.end <= data.len(), OutOfRangeSnafu);
+        ensure!(range.start <= range.end, BadRangeSnafu);
+
+        Ok(data.slice(range))
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {

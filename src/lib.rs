@@ -33,13 +33,17 @@ pub mod memory;
 pub mod path;
 pub mod throttle;
 
+mod util;
+
 use crate::path::Path;
+use crate::util::collect_bytes;
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
+use std::ops::Range;
 
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
@@ -52,6 +56,10 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;
+
+    /// Return the bytes that are stored at the specified location
+    /// in the given byte range
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes>;
 
     /// Return the metadata for the specified location
     async fn head(&self, location: &Path) -> Result<ObjectMeta>;
@@ -109,23 +117,16 @@ pub enum GetResult {
 impl Debug for GetResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            GetResult::File(_, _) => write!(f, "GetResult(File)"),
-            GetResult::Stream(_) => write!(f, "GetResult(Stream)"),
+            Self::File(_, _) => write!(f, "GetResult(File)"),
+            Self::Stream(_) => write!(f, "GetResult(Stream)"),
         }
     }
 }
 
 impl GetResult {
-    /// Collects the data into a [`Vec<u8>`]
-    pub async fn bytes(self) -> Result<Vec<u8>> {
-        let mut stream = self.into_stream();
-        let mut bytes = Vec::new();
-
-        while let Some(next) = stream.next().await {
-            bytes.extend_from_slice(next?.as_ref())
-        }
-
-        Ok(bytes)
+    /// Collects the data into a [`Bytes`]
+    pub async fn bytes(self) -> Result<Bytes> {
+        collect_bytes(self.into_stream(), None).await
     }
 
     /// Converts this into a byte stream
@@ -172,6 +173,11 @@ pub enum Error {
         context(false)
     )]
     InvalidPath { source: path::Error },
+
+    #[snafu(display("Operation not supported: {}", source))]
+    NotSupported {
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
 #[cfg(test)]
@@ -200,6 +206,8 @@ mod tests {
     type Result<T, E = Error> = std::result::Result<T, E>;
 
     pub(crate) async fn put_get_delete_list(storage: &DynObjectStore) -> Result<()> {
+        let store_str = storage.to_string();
+
         delete_fixtures(storage).await;
 
         let content_list = flatten_list_stream(storage, None).await?;
@@ -250,6 +258,36 @@ mod tests {
         let read_data = storage.get(&location).await?.bytes().await?;
         assert_eq!(&*read_data, expected_data);
 
+        // Test range request
+        let range = 3..7;
+        let range_result = storage.get_range(&location, range.clone()).await;
+
+        let out_of_range = 200..300;
+        let out_of_range_result = storage.get_range(&location, out_of_range).await;
+
+        if store_str.starts_with("GoogleCloudStorage") {
+            // cloud_storage_rs doesn't report range requests (yet)
+            let err = range_result.unwrap_err();
+            assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
+
+            let err = out_of_range_result.unwrap_err();
+            assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
+        } else if store_str.starts_with("MicrosoftAzureEmulator") {
+            // Azurite doesn't support x-ms-range-get-content-crc64 set by Azure SDK
+            // https://github.com/Azure/Azurite/issues/444
+            let err = range_result.unwrap_err().to_string();
+            assert!(err.contains("x-ms-range-get-content-crc64 header or parameter is not supported in Azurite strict mode"), "{}", err);
+
+            let err = out_of_range_result.unwrap_err().to_string();
+            assert!(err.contains("x-ms-range-get-content-crc64 header or parameter is not supported in Azurite strict mode"), "{}", err);
+        } else {
+            let bytes = range_result.unwrap();
+            assert_eq!(bytes, expected_data.slice(range));
+
+            // Should be a non-fatal error
+            out_of_range_result.unwrap_err();
+        }
+
         let head = storage.head(&location).await?;
         assert_eq!(head.size, expected_data.len());
 
@@ -259,7 +297,7 @@ mod tests {
         assert!(content_list.is_empty());
 
         // Azure doesn't report semantic errors
-        let is_azure = storage.to_string().starts_with("MicrosoftAzure");
+        let is_azure = store_str.starts_with("MicrosoftAzure");
 
         let err = storage.get(&location).await.unwrap_err();
         assert!(
@@ -451,7 +489,7 @@ mod tests {
     pub(crate) async fn get_nonexistent_object(
         storage: &DynObjectStore,
         location: Option<Path>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Bytes> {
         let location = location.unwrap_or_else(|| Path::from("this_file_should_not_exist"));
 
         let err = storage.head(&location).await.unwrap_err();

@@ -1,6 +1,7 @@
 //! An object store implementation for Google Cloud Storage
 use crate::{
-    path::{format_prefix, Path, DELIMITER},
+    path::{Path, DELIMITER},
+    util::format_prefix,
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use bytes::Bytes;
 use cloud_storage::{Client, Object};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use snafu::{ResultExt, Snafu};
+use std::ops::Range;
 use std::{convert::TryFrom, env};
 
 /// A specialized `Error` for Google Cloud Storage object store-related errors
@@ -157,6 +159,10 @@ impl ObjectStore for GoogleCloudStorage {
 
         let s = futures::stream::once(async move { Ok(bytes.into()) }).boxed();
         Ok(GetResult::Stream(s))
+    }
+
+    async fn get_range(&self, _location: &Path, _range: Range<usize>) -> Result<Bytes> {
+        Err(super::Error::NotSupported { source: "cloud_storage_rs does not support range requests - https://github.com/ThouCheese/cloud-storage-rs/pull/111".into() })
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {

@@ -1,6 +1,9 @@
 //! An object store implementation for S3
+use crate::util::format_http_range;
 use crate::{
-    path::{format_prefix, Path, DELIMITER},
+    collect_bytes,
+    path::{Path, DELIMITER},
+    util::format_prefix,
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
@@ -8,13 +11,14 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::{
     stream::{self, BoxStream},
-    Future, StreamExt, TryStreamExt,
+    Future, Stream, StreamExt, TryStreamExt,
 };
 use hyper::client::Builder as HyperBuilder;
 use rusoto_core::ByteStream;
 use rusoto_credential::{InstanceMetadataProvider, StaticProvider};
 use rusoto_s3::S3;
 use snafu::{OptionExt, ResultExt, Snafu};
+use std::ops::Range;
 use std::{convert::TryFrom, fmt, num::NonZeroUsize, ops::Deref, sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, warn};
@@ -227,45 +231,15 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
-        let key = location.to_string();
-        let get_request = rusoto_s3::GetObjectRequest {
-            bucket: self.bucket_name.clone(),
-            key: key.clone(),
-            ..Default::default()
-        };
-        let bucket_name = self.bucket_name.clone();
-        let s = self
-            .client()
-            .await
-            .get_object(get_request)
-            .await
-            .map_err(|e| match e {
-                rusoto_core::RusotoError::Service(rusoto_s3::GetObjectError::NoSuchKey(_)) => {
-                    Error::NotFound {
-                        path: key.clone(),
-                        source: e.into(),
-                    }
-                }
-                _ => Error::UnableToGetData {
-                    bucket: self.bucket_name.to_owned(),
-                    path: key.clone(),
-                    source: e,
-                },
-            })?
-            .body
-            .context(NoDataSnafu {
-                bucket: self.bucket_name.to_owned(),
-                path: key.clone(),
-            })?
-            .map_err(move |source| Error::UnableToGetPieceOfData {
-                source,
-                bucket: bucket_name.clone(),
-                path: key.clone(),
-            })
-            .err_into()
-            .boxed();
+        Ok(GetResult::Stream(
+            self.get_object(location, None).await?.boxed(),
+        ))
+    }
 
-        Ok(GetResult::Stream(s))
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let size_hint = range.end - range.start;
+        let stream = self.get_object(location, Some(range)).await?;
+        collect_bytes(stream, Some(size_hint)).await
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
@@ -536,6 +510,52 @@ impl AmazonS3 {
             permit: Arc::new(permit),
             inner: self.client_unrestricted.clone(),
         }
+    }
+
+    async fn get_object(
+        &self,
+        location: &Path,
+        range: Option<Range<usize>>,
+    ) -> Result<impl Stream<Item = Result<Bytes>>> {
+        let key = location.to_string();
+        let get_request = rusoto_s3::GetObjectRequest {
+            bucket: self.bucket_name.clone(),
+            key: key.clone(),
+            range: range.map(format_http_range),
+            ..Default::default()
+        };
+        let bucket_name = self.bucket_name.clone();
+        let stream = self
+            .client()
+            .await
+            .get_object(get_request)
+            .await
+            .map_err(|e| match e {
+                rusoto_core::RusotoError::Service(rusoto_s3::GetObjectError::NoSuchKey(_)) => {
+                    Error::NotFound {
+                        path: key.clone(),
+                        source: e.into(),
+                    }
+                }
+                _ => Error::UnableToGetData {
+                    bucket: self.bucket_name.to_owned(),
+                    path: key.clone(),
+                    source: e,
+                },
+            })?
+            .body
+            .context(NoDataSnafu {
+                bucket: self.bucket_name.to_owned(),
+                path: key.clone(),
+            })?
+            .map_err(move |source| Error::UnableToGetPieceOfData {
+                source,
+                bucket: bucket_name.clone(),
+                path: key.clone(),
+            })
+            .err_into();
+
+        Ok(stream)
     }
 
     async fn list_objects_v2(
