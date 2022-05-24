@@ -1,18 +1,18 @@
 //! An object store implementation for a local filesystem
-use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
+use crate::{
+    maybe_spawn_blocking, path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{
-    stream::{self, BoxStream},
-    StreamExt,
-};
+use futures::{stream::BoxStream, StreamExt};
 use percent_encoding::percent_decode;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
-use std::io::SeekFrom;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
+use std::sync::Arc;
 use std::{collections::BTreeSet, convert::TryFrom, io};
-use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use url::Url;
 use walkdir::{DirEntry, WalkDir};
 
@@ -27,9 +27,7 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to walk dir: {}", source))]
-    UnableToWalkDir {
-        source: walkdir::Error,
-    },
+    UnableToWalkDir { source: walkdir::Error },
 
     #[snafu(display("Unable to access metadata for {}: {}", path, source))]
     UnableToAccessMetadata {
@@ -38,9 +36,7 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to copy data to file: {}", source))]
-    UnableToCopyDataToFile {
-        source: io::Error,
-    },
+    UnableToCopyDataToFile { source: io::Error },
 
     #[snafu(display("Unable to create dir {}: {}", path.display(), source))]
     UnableToCreateDir {
@@ -80,7 +76,7 @@ pub(crate) enum Error {
     },
 
     NotFound {
-        path: String,
+        path: std::path::PathBuf,
         source: io::Error,
     },
 
@@ -103,21 +99,17 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
-    InvalidPath {
-        path: std::path::PathBuf,
-    },
+    InvalidPath { path: std::path::PathBuf },
 
     #[snafu(display("Unable to convert URL \"{}\" to filesystem path", url))]
-    InvalidUrl {
-        url: Url,
-    },
+    InvalidUrl { url: Url },
 }
 
 impl From<Error> for super::Error {
     fn from(source: Error) -> Self {
         match source {
             Error::NotFound { path, source } => Self::NotFound {
-                path,
+                path: path.to_string_lossy().to_string(),
                 source: source.into(),
             },
             _ => Self::Generic {
@@ -138,14 +130,25 @@ impl From<Error> for super::Error {
 ///
 /// [file URI]: https://en.wikipedia.org/wiki/File_URI_scheme
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
+///
+/// # Blocking Behaviour
+///
+/// If called from a tokio context, will use [`tokio::runtime::Handle::spawn_blocking`] to
+/// spawn the blocking work to a background thread, otherwise will perform potentially
+/// blocking IO on the current thread
 #[derive(Debug)]
 pub struct LocalFileSystem {
+    config: Arc<Config>,
+}
+
+#[derive(Debug)]
+struct Config {
     root: Url,
 }
 
 impl std::fmt::Display for LocalFileSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LocalFileSystem({})", self.root)
+        write!(f, "LocalFileSystem({})", self.config.root)
     }
 }
 
@@ -159,17 +162,23 @@ impl LocalFileSystem {
     /// Create new filesystem storage with no prefix
     pub fn new() -> Self {
         Self {
-            root: Url::parse("file:///").unwrap(),
+            config: Arc::new(Config {
+                root: Url::parse("file:///").unwrap(),
+            }),
         }
     }
 
     /// Create new filesystem storage with `prefix` applied to all paths
     pub fn new_with_prefix(prefix: impl AsRef<std::path::Path>) -> Result<Self> {
         Ok(Self {
-            root: path_to_url(prefix, true)?,
+            config: Arc::new(Config {
+                root: path_to_url(prefix, true)?,
+            }),
         })
     }
+}
 
+impl Config {
     /// Return filesystem path of the given location
     fn path_to_filesystem(&self, location: &Path) -> Result<std::path::PathBuf> {
         let mut url = self.root.clone();
@@ -192,118 +201,107 @@ impl LocalFileSystem {
 
         Ok(Path::parse(decoded)?)
     }
-
-    async fn get_file(&self, location: &Path) -> Result<(fs::File, std::path::PathBuf)> {
-        let path = self.path_to_filesystem(location)?;
-
-        let file = fs::File::open(&path).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Error::NotFound {
-                    path: location.to_string(),
-                    source: e,
-                }
-            } else {
-                Error::UnableToOpenFile {
-                    path: path.clone(),
-                    source: e,
-                }
-            }
-        })?;
-        Ok((file, path))
-    }
 }
 
 #[async_trait]
 impl ObjectStore for LocalFileSystem {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        let content = bytes::BytesMut::from(&*bytes);
+        let path = self.config.path_to_filesystem(location)?;
 
-        let path = self.path_to_filesystem(location)?;
+        maybe_spawn_blocking(move || {
+            let mut file = match File::create(&path) {
+                Ok(f) => f,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let parent = path
+                        .parent()
+                        .context(UnableToCreateFileSnafu { path: &path, err })?;
+                    std::fs::create_dir_all(&parent)
+                        .context(UnableToCreateDirSnafu { path: parent })?;
 
-        let mut file = match fs::File::create(&path).await {
-            Ok(f) => f,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let parent = path
-                    .parent()
-                    .context(UnableToCreateFileSnafu { path: &path, err })?;
-                fs::create_dir_all(&parent)
-                    .await
-                    .context(UnableToCreateDirSnafu { path: parent })?;
-
-                match fs::File::create(&path).await {
-                    Ok(f) => f,
-                    Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
+                    match File::create(&path) {
+                        Ok(f) => f,
+                        Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
+                    }
                 }
-            }
-            Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
-        };
+                Err(err) => return Err(Error::UnableToCreateFile { path, err }.into()),
+            };
 
-        tokio::io::copy(&mut &content[..], &mut file)
-            .await
-            .context(UnableToCopyDataToFileSnafu)?;
+            file.write_all(&bytes)
+                .context(UnableToCopyDataToFileSnafu)?;
 
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
-        let (file, path) = self.get_file(location).await?;
-        Ok(GetResult::File(file, path))
+        let path = self.config.path_to_filesystem(location)?;
+        maybe_spawn_blocking(move || {
+            let file = open_file(&path)?;
+            Ok(GetResult::File(file, path))
+        })
+        .await
     }
 
     async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
-        let (mut file, path) = self.get_file(location).await?;
+        let path = self.config.path_to_filesystem(location)?;
+        maybe_spawn_blocking(move || {
+            let mut file = open_file(&path)?;
+            let to_read = range.end - range.start;
+            file.seek(SeekFrom::Start(range.start as u64))
+                .context(SeekSnafu { path: &path })?;
 
-        let to_read = range.end - range.start;
-        let mut bytes = Vec::with_capacity(to_read);
-
-        file.seek(SeekFrom::Start(range.start as u64))
-            .await
-            .context(SeekSnafu { path: &path })?;
-
-        while bytes.len() != to_read {
-            let before = bytes.len();
-            file.read_buf(&mut bytes)
-                .await
+            let mut buf = Vec::with_capacity(to_read);
+            let read = file
+                .take(to_read as u64)
+                .read_to_end(&mut buf)
                 .context(UnableToReadBytesSnafu { path: &path })?;
 
             ensure!(
-                before != bytes.len(),
+                read == to_read,
                 OutOfRangeSnafu {
                     path: &path,
-                    expected: range.end,
-                    actual: range.start + bytes.len()
+                    expected: to_read,
+                    actual: read
                 }
-            )
-        }
+            );
 
-        Ok(bytes.into())
+            Ok(buf.into())
+        })
+        .await
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        let (file, _) = self.get_file(location).await?;
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|e| Error::UnableToAccessMetadata {
+        let path = self.config.path_to_filesystem(location)?;
+        let location = location.clone();
+
+        maybe_spawn_blocking(move || {
+            let file = open_file(&path)?;
+            let metadata = file.metadata().map_err(|e| Error::UnableToAccessMetadata {
                 source: e.into(),
                 path: location.to_string(),
             })?;
 
-        convert_metadata(metadata, location.clone())
+            convert_metadata(metadata, location)
+        })
+        .await
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let path = self.path_to_filesystem(location)?;
-        fs::remove_file(&path)
-            .await
-            .context(UnableToDeleteFileSnafu { path })?;
-        Ok(())
+        let path = self.config.path_to_filesystem(location)?;
+        maybe_spawn_blocking(move || {
+            std::fs::remove_file(&path).context(UnableToDeleteFileSnafu { path })?;
+            Ok(())
+        })
+        .await
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+        let config = Arc::clone(&self.config);
+
         let root_path = match prefix {
-            Some(prefix) => self.path_to_filesystem(prefix)?,
-            None => self.root.to_file_path().unwrap(),
+            Some(prefix) => config.path_to_filesystem(prefix)?,
+            None => self.config.root.to_file_path().unwrap(),
         };
 
         let walkdir = WalkDir::new(&root_path)
@@ -318,56 +316,107 @@ impl ObjectStore for LocalFileSystem {
                     Ok(entry @ Some(_)) => entry
                         .filter(|dir_entry| dir_entry.file_type().is_file())
                         .map(|entry| {
-                            let location = self.filesystem_to_path(entry.path())?;
+                            let location = config.filesystem_to_path(entry.path())?;
                             convert_entry(entry, location)
                         }),
                 }
             });
 
-        Ok(stream::iter(s).boxed())
+        // If no tokio context, return iterator
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Ok(futures::stream::iter(s).boxed());
+        }
+
+        // Otherwise list in batches of CHUNK_SIZE
+        const CHUNK_SIZE: usize = 1024;
+
+        let buffer = VecDeque::with_capacity(CHUNK_SIZE);
+        let stream = futures::stream::try_unfold((s, buffer), |mut state| async move {
+            if state.1.is_empty() {
+                state = tokio::task::spawn_blocking(move || {
+                    for _ in 0..CHUNK_SIZE {
+                        match state.0.next() {
+                            Some(r) => state.1.push_back(r),
+                            None => break,
+                        }
+                    }
+                    state
+                })
+                .await?;
+            }
+
+            match state.1.pop_front() {
+                Some(Err(e)) => Err(e),
+                Some(Ok(meta)) => Ok(Some((meta, state))),
+                None => Ok(None),
+            }
+        });
+
+        Ok(stream.boxed())
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
-        let root = Path::default();
-        let prefix = prefix.unwrap_or(&root);
+        let config = Arc::clone(&self.config);
 
-        let resolved_prefix = self.path_to_filesystem(prefix)?;
-        let walkdir = WalkDir::new(&resolved_prefix).min_depth(1).max_depth(1);
+        let prefix = prefix.cloned().unwrap_or_default();
+        let resolved_prefix = config.path_to_filesystem(&prefix)?;
 
-        let mut common_prefixes = BTreeSet::new();
-        let mut objects = Vec::new();
+        maybe_spawn_blocking(move || {
+            let walkdir = WalkDir::new(&resolved_prefix).min_depth(1).max_depth(1);
 
-        for entry_res in walkdir.into_iter().map(convert_walkdir_result) {
-            if let Some(entry) = entry_res? {
-                let is_directory = entry.file_type().is_dir();
-                let entry_location = self.filesystem_to_path(entry.path())?;
+            let mut common_prefixes = BTreeSet::new();
+            let mut objects = Vec::new();
 
-                let mut parts = match entry_location.prefix_match(prefix) {
-                    Some(parts) => parts,
-                    None => continue,
-                };
+            for entry_res in walkdir.into_iter().map(convert_walkdir_result) {
+                if let Some(entry) = entry_res? {
+                    let is_directory = entry.file_type().is_dir();
+                    let entry_location = config.filesystem_to_path(entry.path())?;
 
-                let common_prefix = match parts.next() {
-                    Some(p) => p,
-                    None => continue,
-                };
+                    let mut parts = match entry_location.prefix_match(&prefix) {
+                        Some(parts) => parts,
+                        None => continue,
+                    };
 
-                drop(parts);
+                    let common_prefix = match parts.next() {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
-                if is_directory {
-                    common_prefixes.insert(prefix.child(common_prefix));
-                } else {
-                    objects.push(convert_entry(entry, entry_location)?);
+                    drop(parts);
+
+                    if is_directory {
+                        common_prefixes.insert(prefix.child(common_prefix));
+                    } else {
+                        objects.push(convert_entry(entry, entry_location)?);
+                    }
                 }
             }
-        }
 
-        Ok(ListResult {
-            next_token: None,
-            common_prefixes: common_prefixes.into_iter().collect(),
-            objects,
+            Ok(ListResult {
+                next_token: None,
+                common_prefixes: common_prefixes.into_iter().collect(),
+                objects,
+            })
         })
+        .await
     }
+}
+
+fn open_file(path: &std::path::PathBuf) -> Result<File> {
+    let file = File::open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::NotFound {
+                path: path.clone(),
+                source: e,
+            }
+        } else {
+            Error::UnableToOpenFile {
+                path: path.clone(),
+                source: e,
+            }
+        }
+    })?;
+    Ok(file)
 }
 
 /// Encode a path as a URL
@@ -461,6 +510,17 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+    }
+
+    #[test]
+    fn test_non_tokio() {
+        let root = TempDir::new().unwrap();
+        let integration = LocalFileSystem::new_with_prefix(root.path()).unwrap();
+        futures::executor::block_on(async move {
+            put_get_delete_list(&integration).await.unwrap();
+            list_uses_directories_correctly(&integration).await.unwrap();
+            list_with_delimiter(&integration).await.unwrap();
+        });
     }
 
     #[tokio::test]
@@ -563,7 +623,7 @@ mod tests {
                 "got: {:?}",
                 source_variant
             );
-            assert_eq!(path, NON_EXISTENT_NAME);
+            assert!(path.ends_with(NON_EXISTENT_NAME), "{}", path);
         } else {
             panic!("unexpected error type: {:?}", err);
         }
@@ -577,7 +637,7 @@ mod tests {
         let url = Url::from_directory_path(&canonical).unwrap();
         let path = Path::parse(url.path()).unwrap();
 
-        let roundtrip = integration.path_to_filesystem(&path).unwrap();
+        let roundtrip = integration.config.path_to_filesystem(&path).unwrap();
 
         // Needed as on Windows canonicalize returns extended length path syntax
         // C:\Users\circleci -> \\?\C:\Users\circleci
