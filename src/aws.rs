@@ -1,5 +1,5 @@
 //! An object store implementation for S3
-use crate::util::format_range;
+use crate::util::format_http_range;
 use crate::{
     collect_bytes,
     path::{Path, DELIMITER},
@@ -521,7 +521,7 @@ impl AmazonS3 {
         let get_request = rusoto_s3::GetObjectRequest {
             bucket: self.bucket_name.clone(),
             key: key.clone(),
-            range: range.map(format_range),
+            range: range.map(format_http_range),
             ..Default::default()
         };
         let bucket_name = self.bucket_name.clone();

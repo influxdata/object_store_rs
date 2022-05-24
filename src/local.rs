@@ -7,7 +7,7 @@ use futures::{
     StreamExt,
 };
 use percent_encoding::percent_decode;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::{collections::BTreeSet, convert::TryFrom, io};
@@ -70,6 +70,13 @@ pub(crate) enum Error {
     UnableToReadBytes {
         source: io::Error,
         path: std::path::PathBuf,
+    },
+
+    #[snafu(display("Out of range of file {}, expected: {}, actual: {}", path.display(), expected, actual))]
+    OutOfRange {
+        path: std::path::PathBuf,
+        expected: usize,
+        actual: usize,
     },
 
     NotFound {
@@ -254,9 +261,19 @@ impl ObjectStore for LocalFileSystem {
             .context(SeekSnafu { path: &path })?;
 
         while bytes.len() != to_read {
+            let before = bytes.len();
             file.read_buf(&mut bytes)
                 .await
                 .context(UnableToReadBytesSnafu { path: &path })?;
+
+            ensure!(
+                before != bytes.len(),
+                OutOfRangeSnafu {
+                    path: &path,
+                    expected: range.end,
+                    actual: range.start + bytes.len()
+                }
+            )
         }
 
         Ok(bytes.into())

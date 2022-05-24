@@ -11,9 +11,10 @@ pub fn format_prefix(prefix: Option<&crate::path::Path>) -> Option<String> {
         .map(|p| format!("{}{}", p.as_ref(), crate::path::DELIMITER))
 }
 
-/// Returns the range to be passed to an object store
+/// Returns a formatted HTTP range header as per
+/// <https://httpwg.org/specs/rfc7233.html#header.range>
 #[cfg(any(feature = "aws"))]
-pub fn format_range(range: std::ops::Range<usize>) -> String {
+pub fn format_http_range(range: std::ops::Range<usize>) -> String {
     format!("bytes={}-{}", range.start, range.end.saturating_sub(1))
 }
 

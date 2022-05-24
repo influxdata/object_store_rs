@@ -262,17 +262,30 @@ mod tests {
         let range = 3..7;
         let range_result = storage.get_range(&location, range.clone()).await;
 
+        let out_of_range = 200..300;
+        let out_of_range_result = storage.get_range(&location, out_of_range).await;
+
         if store_str.starts_with("GoogleCloudStorage") {
             // cloud_storage_rs doesn't report range requests (yet)
             let err = range_result.unwrap_err();
             assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
+
+            let err = out_of_range_result.unwrap_err();
+            assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
         } else if store_str.starts_with("MicrosoftAzureEmulator") {
-            // Azurite doesn't support range requests
+            // Azurite doesn't support x-ms-range-get-content-crc64 set by Azure SDK
+            // https://github.com/Azure/Azurite/issues/444
             let err = range_result.unwrap_err().to_string();
+            assert!(err.contains("x-ms-range-get-content-crc64 header or parameter is not supported in Azurite strict mode"), "{}", err);
+
+            let err = out_of_range_result.unwrap_err().to_string();
             assert!(err.contains("x-ms-range-get-content-crc64 header or parameter is not supported in Azurite strict mode"), "{}", err);
         } else {
             let bytes = range_result.unwrap();
             assert_eq!(bytes, expected_data.slice(range));
+
+            // Should be a non-fatal error
+            out_of_range_result.unwrap_err();
         }
 
         let head = storage.head(&location).await?;
