@@ -131,11 +131,15 @@ impl From<Error> for super::Error {
 /// [file URI]: https://en.wikipedia.org/wiki/File_URI_scheme
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
 ///
-/// # Blocking Behaviour
+/// # Tokio Compatibility
 ///
-/// If called from a tokio context, will use [`tokio::runtime::Handle::spawn_blocking`] to
-/// spawn the blocking work to a background thread, otherwise will perform potentially
-/// blocking IO on the current thread
+/// Tokio discourages performing blocking IO on a tokio worker thread, however,
+/// no major operating systems have stable async file APIs. Therefore if called from
+/// a tokio context, this will use [`tokio::runtime::Handle::spawn_blocking`] to dispatch
+/// IO to a blocking thread pool, much like [`tokio::fs`] does under-the-hood.
+///
+/// If not called from a tokio context, this will perform IO on the current thread with
+/// no additional complexity or overheads
 #[derive(Debug)]
 pub struct LocalFileSystem {
     config: Arc<Config>,
@@ -322,7 +326,8 @@ impl ObjectStore for LocalFileSystem {
                 }
             });
 
-        // If no tokio context, return iterator
+        // If no tokio context, return iterator directly as no
+        // need to perform chunked spawn_blocking reads
         if tokio::runtime::Handle::try_current().is_err() {
             return Ok(futures::stream::iter(s).boxed());
         }
@@ -331,23 +336,23 @@ impl ObjectStore for LocalFileSystem {
         const CHUNK_SIZE: usize = 1024;
 
         let buffer = VecDeque::with_capacity(CHUNK_SIZE);
-        let stream = futures::stream::try_unfold((s, buffer), |mut state| async move {
-            if state.1.is_empty() {
-                state = tokio::task::spawn_blocking(move || {
+        let stream = futures::stream::try_unfold((s, buffer), |(mut s, mut buffer)| async move {
+            if buffer.is_empty() {
+                (s, buffer) = tokio::task::spawn_blocking(move || {
                     for _ in 0..CHUNK_SIZE {
-                        match state.0.next() {
-                            Some(r) => state.1.push_back(r),
+                        match s.next() {
+                            Some(r) => buffer.push_back(r),
                             None => break,
                         }
                     }
-                    state
+                    (s, buffer)
                 })
                 .await?;
             }
 
-            match state.1.pop_front() {
+            match buffer.pop_front() {
                 Some(Err(e)) => Err(e),
-                Some(Ok(meta)) => Ok(Some((meta, state))),
+                Some(Ok(meta)) => Ok(Some((meta, (s, buffer)))),
                 None => Ok(None),
             }
         });

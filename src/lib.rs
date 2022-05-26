@@ -108,6 +108,9 @@ pub struct ObjectMeta {
 }
 
 /// Result for a get request
+///
+/// This special cases the case of a local file, as some systems may
+/// be able to optimise the case of a file already present on local disk
 pub enum GetResult {
     /// A file and its path on the local filesystem
     File(std::fs::File, std::path::PathBuf),
@@ -160,11 +163,15 @@ impl GetResult {
     /// If the result is [`Self::File`] will perform chunked reads of the file, otherwise
     /// will return the [`Self::Stream`].
     ///
-    /// # Blocking Behaviour
+    /// # Tokio Compatibility
     ///
-    /// If called from a tokio context, will use [`tokio::runtime::Handle::spawn_blocking`] to
-    /// spawn the blocking work to a background thread, otherwise will perform potentially
-    /// blocking IO on the current thread
+    /// Tokio discourages performing blocking IO on a tokio worker thread, however,
+    /// no major operating systems have stable async file APIs. Therefore if called from
+    /// a tokio context, this will use [`tokio::runtime::Handle::spawn_blocking`] to dispatch
+    /// IO to a blocking thread pool, much like [`tokio::fs`] does under-the-hood.
+    ///
+    /// If not called from a tokio context, this will perform IO on the current thread with
+    /// no additional complexity or overheads
     pub fn into_stream(self) -> BoxStream<'static, Result<Bytes>> {
         match self {
             Self::File(file, path) => {
