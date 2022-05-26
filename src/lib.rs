@@ -168,7 +168,7 @@ impl GetResult {
     /// Tokio discourages performing blocking IO on a tokio worker thread, however,
     /// no major operating systems have stable async file APIs. Therefore if called from
     /// a tokio context, this will use [`tokio::runtime::Handle::spawn_blocking`] to dispatch
-    /// IO to a blocking thread pool, much like [`tokio::fs`] does under-the-hood.
+    /// IO to a blocking thread pool, much like `tokio::fs` does under-the-hood.
     ///
     /// If not called from a tokio context, this will perform IO on the current thread with
     /// no additional complexity or overheads
