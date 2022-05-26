@@ -36,13 +36,14 @@ pub mod throttle;
 mod util;
 
 use crate::path::Path;
-use crate::util::collect_bytes;
+use crate::util::{collect_bytes, maybe_spawn_blocking};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use futures::{stream::BoxStream, StreamExt};
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 
 /// An alias for a dynamically dispatched object store implementation.
@@ -107,9 +108,12 @@ pub struct ObjectMeta {
 }
 
 /// Result for a get request
+///
+/// This special cases the case of a local file, as some systems may
+/// be able to optimise the case of a file already present on local disk
 pub enum GetResult {
     /// A file and its path on the local filesystem
-    File(tokio::fs::File, std::path::PathBuf),
+    File(std::fs::File, std::path::PathBuf),
     /// An asynchronous stream
     Stream(BoxStream<'static, Result<Bytes>>),
 }
@@ -126,23 +130,73 @@ impl Debug for GetResult {
 impl GetResult {
     /// Collects the data into a [`Bytes`]
     pub async fn bytes(self) -> Result<Bytes> {
-        collect_bytes(self.into_stream(), None).await
+        match self {
+            Self::File(mut file, path) => {
+                maybe_spawn_blocking(move || {
+                    let len = file
+                        .seek(SeekFrom::End(0))
+                        .map_err(|source| local::Error::Seek {
+                            source,
+                            path: path.clone(),
+                        })?;
+
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|source| local::Error::Seek {
+                            source,
+                            path: path.clone(),
+                        })?;
+
+                    let mut buffer = Vec::with_capacity(len as usize);
+                    file.read_to_end(&mut buffer)
+                        .map_err(|source| local::Error::UnableToReadBytes { source, path })?;
+
+                    Ok(buffer.into())
+                })
+                .await
+            }
+            Self::Stream(s) => collect_bytes(s, None).await,
+        }
     }
 
     /// Converts this into a byte stream
+    ///
+    /// If the result is [`Self::File`] will perform chunked reads of the file, otherwise
+    /// will return the [`Self::Stream`].
+    ///
+    /// # Tokio Compatibility
+    ///
+    /// Tokio discourages performing blocking IO on a tokio worker thread, however,
+    /// no major operating systems have stable async file APIs. Therefore if called from
+    /// a tokio context, this will use [`tokio::runtime::Handle::spawn_blocking`] to dispatch
+    /// IO to a blocking thread pool, much like `tokio::fs` does under-the-hood.
+    ///
+    /// If not called from a tokio context, this will perform IO on the current thread with
+    /// no additional complexity or overheads
     pub fn into_stream(self) -> BoxStream<'static, Result<Bytes>> {
         match self {
             Self::File(file, path) => {
-                tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new())
-                    .map_ok(|b| b.freeze())
-                    .map_err(move |source| {
-                        local::Error::UnableToReadBytes {
-                            source,
-                            path: path.clone(),
+                const CHUNK_SIZE: usize = 8 * 1024;
+
+                futures::stream::try_unfold((file, path, false), |(mut file, path, finished)| {
+                    maybe_spawn_blocking(move || {
+                        if finished {
+                            return Ok(None);
                         }
-                        .into()
+
+                        let mut buffer = Vec::with_capacity(CHUNK_SIZE);
+                        let read = file
+                            .by_ref()
+                            .take(CHUNK_SIZE as u64)
+                            .read_to_end(&mut buffer)
+                            .map_err(|e| local::Error::UnableToReadBytes {
+                                source: e,
+                                path: path.clone(),
+                            })?;
+
+                        Ok(Some((buffer.into(), (file, path, read != CHUNK_SIZE))))
                     })
-                    .boxed()
+                })
+                .boxed()
             }
             Self::Stream(s) => s,
         }
@@ -174,6 +228,9 @@ pub enum Error {
     )]
     InvalidPath { source: path::Error },
 
+    #[snafu(display("Error joining spawned task: {}", source), context(false))]
+    JoinError { source: tokio::task::JoinError },
+
     #[snafu(display("Operation not supported: {}", source))]
     NotSupported {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
@@ -183,6 +240,7 @@ pub enum Error {
 #[cfg(test)]
 mod test_util {
     use super::*;
+    use futures::TryStreamExt;
 
     pub async fn flatten_list_stream(
         storage: &DynObjectStore,
