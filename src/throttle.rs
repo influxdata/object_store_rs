@@ -276,7 +276,7 @@ mod tests {
         list_uses_directories_correctly(&store).await.unwrap();
         list_with_delimiter(&store).await.unwrap();
         rename_and_copy(&store).await.unwrap();
-        rename_no_replace(&integration).await.unwrap();
+        rename_no_replace(&store).await.unwrap();
     }
 
     #[tokio::test]

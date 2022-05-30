@@ -242,11 +242,11 @@ impl ObjectStore for MicrosoftAzure {
         })
     }
 
-    async fn copy(&self, source: &Path, dest: &Path) -> Result<()> {
+    async fn copy(&self, _from: &Path, _to: &Path) -> Result<()> {
         todo!()
     }
 
-    async fn rename_no_replace(&self, source: &Path, dest: &Path) -> Result<()> {
+    async fn rename_no_replace(&self, _from: &Path, _to: &Path) -> Result<()> {
         todo!()
     }
 }

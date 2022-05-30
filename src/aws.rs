@@ -387,8 +387,8 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        let from = from.to_raw();
-        let to = to.to_raw();
+        let from = from.as_ref();
+        let to = to.as_ref();
         let bucket_name = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::CopyObjectRequest {

@@ -586,8 +586,8 @@ mod tests {
 
     pub(crate) async fn rename_and_copy(storage: &DynObjectStore) -> Result<()> {
         // Create two objects
-        let path1 = Path::from_raw("test1");
-        let path2 = Path::from_raw("test2");
+        let path1 = Path::from("test1");
+        let path2 = Path::from("test2");
         let contents1 = Bytes::from("cats");
         let contents2 = Bytes::from("dogs");
 
@@ -616,8 +616,8 @@ mod tests {
 
     pub(crate) async fn rename_no_replace(storage: &DynObjectStore) -> Result<()> {
         // Create two objects
-        let path1 = Path::from_raw("test1");
-        let path2 = Path::from_raw("test2");
+        let path1 = Path::from("test1");
+        let path2 = Path::from("test2");
         let contents1 = Bytes::from("cats");
         let contents2 = Bytes::from("dogs");
 

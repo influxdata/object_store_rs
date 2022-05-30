@@ -303,8 +303,8 @@ impl ObjectStore for GoogleCloudStorage {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        let from = from.to_raw();
-        let to = to.to_raw();
+        let from = from.as_ref();
+        let to = to.as_ref();
         let bucket_name = self.bucket_name.clone();
 
         let source_obj = self
@@ -326,7 +326,7 @@ impl ObjectStore for GoogleCloudStorage {
                     source: e,
                 },
             })?;
-        // TODO: Handle different buckets?
+
         self.client
             .object()
             .copy(&source_obj, &bucket_name, to)
