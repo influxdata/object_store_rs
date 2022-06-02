@@ -340,7 +340,7 @@ impl ObjectStore for GoogleCloudStorage {
         Ok(())
     }
 
-    async fn rename_no_replace(&self, _source: &Path, _dest: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
         todo!("cloud-storage crate doesn't yet support rewrite_object with precondition")
     }
 }

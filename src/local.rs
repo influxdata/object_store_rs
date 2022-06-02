@@ -458,18 +458,18 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
         let from = self.config.path_to_filesystem(from)?;
         let to = self.config.path_to_filesystem(to)?;
 
         maybe_spawn_blocking(move || {
-            imp::rename_no_replace(&from, &to).map_err(|err| match err.kind() {
+            std::fs::hard_link(&from, &to).map_err(|err| match err.kind() {
                 io::ErrorKind::AlreadyExists => Error::AlreadyExists {
                     path: to.to_str().unwrap().to_string(),
                     source: err,
                 }
                 .into(),
-                _ => Error::UnableToRenameFile {
+                _ => Error::UnableToCopyFile {
                     from,
                     to,
                     source: err,
@@ -478,82 +478,6 @@ impl ObjectStore for LocalFileSystem {
             })
         })
         .await
-    }
-}
-
-#[cfg(windows)]
-mod imp {
-    use super::*;
-    use std::path::PathBuf;
-    use widestring::U16CString;
-    use winapi::um::errhandlingapi;
-    use winapi::um::winbase;
-
-    fn to_wide_string(p: &PathBuf) -> Result<U16CString, io::Error> {
-        U16CString::from_os_str(p).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
-    }
-
-    pub fn rename_no_replace(from: &PathBuf, to: &PathBuf) -> Result<(), io::Error> {
-        let from = to_wide_string(from)?;
-        let to = to_wide_string(to)?;
-
-        // std::fs::rename on Windows calls MoveFileExW with MOVEFILE_REPLACE_EXISTING flag,
-        // so we call here without that flag.
-        unsafe {
-            let success = winbase::MoveFileW(from.as_ptr(), to.as_ptr());
-            if success == 0 {
-                let error_code = errhandlingapi::GetLastError();
-                Err(io::Error::from_raw_os_error(error_code as i32))
-            } else {
-                Ok(())
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-mod imp {
-    use super::*;
-    use std::ffi::CString;
-
-    fn to_c_string(p: &std::path::Path) -> Result<CString, io::Error> {
-        CString::new(p.to_str().unwrap())
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
-    }
-
-    pub fn rename_no_replace(
-        from: &std::path::Path,
-        to: &std::path::Path,
-    ) -> Result<(), io::Error> {
-        let cs_from = to_c_string(from)?;
-        let cs_to = to_c_string(to)?;
-
-        unsafe { platform_specific_rename(cs_from.as_ptr(), cs_to.as_ptr()) }
-    }
-
-    unsafe fn platform_specific_rename(
-        from: *const libc::c_char,
-        to: *const libc::c_char,
-    ) -> Result<(), io::Error> {
-        cfg_if::cfg_if! {
-            // We only support linux with glibc (>= 2.28), which has renameat2
-            if #[cfg(all(target_os = "linux", target_env = "gnu", glibc_renameat2))] {
-                let res = libc::renameat2(libc::AT_FDCWD, from, libc::AT_FDCWD, to, libc::RENAME_NOREPLACE);
-            } else if #[cfg(target_os = "macos")] {
-                let res = libc::renamex_np(from, to, libc::RENAME_EXCL);
-            } else {
-                unimplemented!()
-            }
-        }
-        match res {
-            0 => Ok(()),
-            _ => {
-                let err_code = io::Error::last_os_error()
-                    .raw_os_error()
-                    .expect("Rename errored but could not retrieve last OS error.");
-                Err(io::Error::from_raw_os_error(err_code))
-            }
-        }
     }
 }
 
@@ -650,8 +574,8 @@ mod tests {
     use crate::test_util::flatten_list_stream;
     use crate::{
         tests::{
-            get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list, rename_and_copy, rename_no_replace,
+            copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
+            list_with_delimiter, put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -666,7 +590,7 @@ mod tests {
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
-        rename_no_replace(&integration).await.unwrap();
+        copy_if_not_exists(&integration).await.unwrap();
     }
 
     #[test]

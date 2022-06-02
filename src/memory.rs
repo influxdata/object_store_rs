@@ -166,7 +166,7 @@ impl ObjectStore for InMemory {
         Ok(())
     }
 
-    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
         let data = self.get_bytes(from).await?;
         let mut storage = self.storage.write().await;
         if storage.contains_key(to) {
@@ -176,7 +176,6 @@ impl ObjectStore for InMemory {
             .into());
         }
         storage.insert(to.clone(), data);
-        storage.remove(from);
         Ok(())
     }
 }
@@ -215,8 +214,8 @@ mod tests {
 
     use crate::{
         tests::{
-            get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list, rename_and_copy, rename_no_replace,
+            copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
+            list_with_delimiter, put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -229,7 +228,7 @@ mod tests {
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
-        rename_no_replace(&integration).await.unwrap();
+        copy_if_not_exists(&integration).await.unwrap();
     }
 
     #[tokio::test]

@@ -224,10 +224,10 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         self.inner.copy(from, to).await
     }
 
-    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
         sleep(self.config().wait_delete_per_call).await;
 
-        self.inner.rename_no_replace(from, to).await
+        self.inner.copy_if_not_exists(from, to).await
     }
 }
 
@@ -242,8 +242,8 @@ mod tests {
     use crate::{
         memory::InMemory,
         tests::{
-            list_uses_directories_correctly, list_with_delimiter, put_get_delete_list,
-            rename_and_copy, rename_no_replace,
+            copy_if_not_exists, list_uses_directories_correctly, list_with_delimiter,
+            put_get_delete_list, rename_and_copy,
         },
     };
     use bytes::Bytes;
@@ -276,7 +276,7 @@ mod tests {
         list_uses_directories_correctly(&store).await.unwrap();
         list_with_delimiter(&store).await.unwrap();
         rename_and_copy(&store).await.unwrap();
-        rename_no_replace(&store).await.unwrap();
+        copy_if_not_exists(&store).await.unwrap();
     }
 
     #[tokio::test]

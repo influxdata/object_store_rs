@@ -246,7 +246,7 @@ impl ObjectStore for MicrosoftAzure {
         todo!()
     }
 
-    async fn rename_no_replace(&self, _from: &Path, _to: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> Result<()> {
         todo!()
     }
 }

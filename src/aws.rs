@@ -415,7 +415,7 @@ impl ObjectStore for AmazonS3 {
         Ok(())
     }
 
-    async fn rename_no_replace(&self, _source: &Path, _dest: &Path) -> Result<()> {
+    async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
         todo!("Will require dynamodb_lock")
     }
 }

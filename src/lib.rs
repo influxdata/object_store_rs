@@ -99,10 +99,10 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
         Ok(())
     }
 
-    /// Move an object from one path to another, only if destination is empty.
+    /// Copy an object from one path to another, only if destination is empty.
     ///
     /// Will return an error if the destination already has an object.
-    async fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()>;
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()>;
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a
@@ -614,27 +614,27 @@ mod tests {
         Ok(())
     }
 
-    pub(crate) async fn rename_no_replace(storage: &DynObjectStore) -> Result<()> {
+    pub(crate) async fn copy_if_not_exists(storage: &DynObjectStore) -> Result<()> {
         // Create two objects
         let path1 = Path::from("test1");
         let path2 = Path::from("test2");
         let contents1 = Bytes::from("cats");
         let contents2 = Bytes::from("dogs");
 
-        // rename_noreplace() errors if destination already exists
+        // copy_if_not_exists() errors if destination already exists
         storage.put(&path1, contents1.clone()).await?;
         storage.put(&path2, contents2.clone()).await?;
-        let result = storage.rename_no_replace(&path1, &path2).await;
+        let result = storage.copy_if_not_exists(&path1, &path2).await;
         assert!(result.is_err());
-        dbg!(&result);
         assert!(matches!(
             result.unwrap_err(),
             crate::Error::AlreadyExists { .. }
         ));
 
-        // rename_noreplace() copies contents and deletes original
+        // copy_if_not_exists() copies contents and allows deleting original
         storage.delete(&path2).await?;
-        storage.rename_no_replace(&path1, &path2).await?;
+        storage.copy_if_not_exists(&path1, &path2).await?;
+        storage.delete(&path1).await?;
         let new_contents = storage.get(&path2).await?.bytes().await?;
         assert_eq!(&new_contents, &contents1);
         let result = storage.get(&path1).await;
