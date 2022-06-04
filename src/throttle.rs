@@ -217,6 +217,18 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
             Err(err) => Err(err),
         }
     }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        sleep(self.config().wait_put_per_call).await;
+
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        sleep(self.config().wait_put_per_call).await;
+
+        self.inner.copy_if_not_exists(from, to).await
+    }
 }
 
 /// Saturated `usize` to `u32` cast.
@@ -229,7 +241,10 @@ mod tests {
     use super::*;
     use crate::{
         memory::InMemory,
-        tests::{list_uses_directories_correctly, list_with_delimiter, put_get_delete_list},
+        tests::{
+            copy_if_not_exists, list_uses_directories_correctly, list_with_delimiter,
+            put_get_delete_list, rename_and_copy,
+        },
     };
     use bytes::Bytes;
     use futures::TryStreamExt;
@@ -260,6 +275,8 @@ mod tests {
         put_get_delete_list(&store).await.unwrap();
         list_uses_directories_correctly(&store).await.unwrap();
         list_with_delimiter(&store).await.unwrap();
+        rename_and_copy(&store).await.unwrap();
+        copy_if_not_exists(&store).await.unwrap();
     }
 
     #[tokio::test]

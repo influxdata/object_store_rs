@@ -79,7 +79,26 @@ enum Error {
         path: String,
     },
 
+    #[snafu(display(
+        "Unable to copy object. Bucket: {}, From: {}, To: {}, Error: {}",
+        bucket,
+        from,
+        to,
+        source,
+    ))]
+    UnableToCopyObject {
+        source: cloud_storage::Error,
+        bucket: String,
+        from: String,
+        to: String,
+    },
+
     NotFound {
+        path: String,
+        source: cloud_storage::Error,
+    },
+
+    AlreadyExists {
         path: String,
         source: cloud_storage::Error,
     },
@@ -282,6 +301,49 @@ impl ObjectStore for GoogleCloudStorage {
 
         Ok(result)
     }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = from.as_ref();
+        let to = to.as_ref();
+        let bucket_name = self.bucket_name.clone();
+
+        let source_obj = self
+            .client
+            .object()
+            .read(&bucket_name, from)
+            .await
+            .map_err(|e| match e {
+                cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
+                    Error::NotFound {
+                        path: from.to_string(),
+                        source: e,
+                    }
+                }
+                _ => Error::UnableToCopyObject {
+                    bucket: self.bucket_name.clone(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    source: e,
+                },
+            })?;
+
+        self.client
+            .object()
+            .copy(&source_obj, &bucket_name, to)
+            .await
+            .context(UnableToCopyObjectSnafu {
+                bucket: self.bucket_name.clone(),
+                from: from.to_string(),
+                to: to.to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
+        // cloud-storage crate doesn't yet support rewrite_object with precondition
+        Err(crate::Error::NotImplemented)
+    }
 }
 
 fn convert_object_meta(object: &Object) -> Result<ObjectMeta> {
@@ -317,7 +379,7 @@ mod test {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -384,6 +446,7 @@ mod test {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
     }
 
     #[tokio::test]

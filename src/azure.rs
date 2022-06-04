@@ -241,6 +241,14 @@ impl ObjectStore for MicrosoftAzure {
             objects,
         })
     }
+
+    async fn copy(&self, _from: &Path, _to: &Path) -> Result<()> {
+        Err(crate::Error::NotImplemented)
+    }
+
+    async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> Result<()> {
+        Err(crate::Error::NotImplemented)
+    }
 }
 
 fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
