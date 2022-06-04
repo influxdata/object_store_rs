@@ -341,7 +341,8 @@ impl ObjectStore for GoogleCloudStorage {
     }
 
     async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
-        todo!("cloud-storage crate doesn't yet support rewrite_object with precondition")
+        // cloud-storage crate doesn't yet support rewrite_object with precondition
+        Err(crate::Error::NotImplemented)
     }
 }
 

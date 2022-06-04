@@ -219,13 +219,13 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        sleep(self.config().wait_delete_per_call).await;
+        sleep(self.config().wait_put_per_call).await;
 
         self.inner.copy(from, to).await
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        sleep(self.config().wait_delete_per_call).await;
+        sleep(self.config().wait_put_per_call).await;
 
         self.inner.copy_if_not_exists(from, to).await
     }

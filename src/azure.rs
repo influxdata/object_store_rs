@@ -243,11 +243,11 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn copy(&self, _from: &Path, _to: &Path) -> Result<()> {
-        todo!()
+        Err(crate::Error::NotImplemented)
     }
 
     async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> Result<()> {
-        todo!()
+        Err(crate::Error::NotImplemented)
     }
 }
 

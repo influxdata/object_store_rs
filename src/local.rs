@@ -86,13 +86,6 @@ pub(crate) enum Error {
         source: io::Error,
     },
 
-    #[snafu(display("Unable to rename file from {} to {}: {}", from.display(), to.display(), source))]
-    UnableToRenameFile {
-        from: std::path::PathBuf,
-        to: std::path::PathBuf,
-        source: io::Error,
-    },
-
     NotFound {
         path: std::path::PathBuf,
         source: io::Error,

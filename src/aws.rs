@@ -416,7 +416,8 @@ impl ObjectStore for AmazonS3 {
     }
 
     async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
-        todo!("Will require dynamodb_lock")
+        // Will need dynamodb_lock
+        Err(crate::Error::NotImplemented)
     }
 }
 

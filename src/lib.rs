@@ -263,6 +263,9 @@ pub enum Error {
         path: String,
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+
+    #[snafu(display("Operation not yet implemented."))]
+    NotImplemented,
 }
 
 #[cfg(test)]
