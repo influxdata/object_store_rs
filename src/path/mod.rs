@@ -1,8 +1,10 @@
 //! Path abstraction for Object Storage
 
 use itertools::Itertools;
+use percent_encoding::percent_decode;
 use snafu::{ensure, ResultExt, Snafu};
 use std::fmt::Formatter;
+use url::Url;
 
 /// The delimiter to separate object namespaces, creating a directory structure.
 pub const DELIMITER: &str = "/";
@@ -21,8 +23,26 @@ pub enum Error {
     #[snafu(display("Path \"{}\" contained empty path segment", path))]
     EmptySegment { path: String },
 
-    #[snafu(display("Error parsing Path \"{}\": \"{}\"", path, source))]
+    #[snafu(display("Error parsing Path \"{}\": {}", path, source))]
     BadSegment { path: String, source: InvalidPart },
+
+    #[snafu(display("Failed to canonicalize path \"{}\": {}", path.display(), source))]
+    Canonicalize {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
+    #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
+    InvalidPath { path: std::path::PathBuf },
+
+    #[snafu(display("Path \"{}\" contained non-unicode characters: {}", path, source))]
+    NonUnicode {
+        path: String,
+        source: std::str::Utf8Error,
+    },
+
+    #[snafu(display("Path {} does not start with prefix {}", path, prefix))]
+    PrefixMismatch { path: String, prefix: String },
 }
 
 /// A parsed path representation that can be safely written to object storage
@@ -108,6 +128,10 @@ impl Path {
         let path = path.as_ref();
 
         let stripped = path.strip_prefix(DELIMITER).unwrap_or(path);
+        if stripped.is_empty() {
+            return Ok(Default::default());
+        }
+
         let stripped = stripped.strip_suffix(DELIMITER).unwrap_or(stripped);
 
         for segment in stripped.split(DELIMITER) {
@@ -118,6 +142,44 @@ impl Path {
         Ok(Self {
             raw: stripped.to_string(),
         })
+    }
+
+    /// Convert a filesystem path to a [`Path`] relative to the filesystem root
+    ///
+    /// This will return an error if the path does not exist, or contains illegal
+    /// character sequences as defined by [`Path::parse`]
+    pub fn from_filesystem_path(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
+        Self::from_filesystem_path_with_base(path, None)
+    }
+
+    /// Convert a filesystem path to a [`Path`] relative to the provided base
+    ///
+    /// This will return an error if the path does not exist on the local filesystem,
+    /// contains illegal character sequences as defined by [`Path::parse`], or `base`
+    /// does not refer to a parent path of `path`
+    pub(crate) fn from_filesystem_path_with_base(
+        path: impl AsRef<std::path::Path>,
+        base: Option<&Url>,
+    ) -> Result<Self, Error> {
+        let url = filesystem_path_to_url(path)?;
+        let path = match base {
+            Some(prefix) => {
+                url.path()
+                    .strip_prefix(prefix.path())
+                    .ok_or_else(|| Error::PrefixMismatch {
+                        path: url.path().to_string(),
+                        prefix: prefix.to_string(),
+                    })?
+            }
+            None => url.path(),
+        };
+
+        // Reverse any percent encoding performed by conversion to URL
+        let decoded = percent_decode(path.as_bytes())
+            .decode_utf8()
+            .context(NonUnicodeSnafu { path })?;
+
+        Self::parse(decoded)
     }
 
     /// Returns the [`PathPart`] of this [`Path`]
@@ -132,15 +194,11 @@ impl Path {
         }
     }
 
-    pub(crate) fn prefix_match(
-        &self,
-        prefix: &Self,
-    ) -> Option<impl Iterator<Item = PathPart<'_>> + '_> {
-        let diff = itertools::diff_with(
-            self.raw.split(DELIMITER).filter(|x| !x.is_empty()),
-            prefix.raw.split(DELIMITER).filter(|x| !x.is_empty()),
-            |a, b| a == b,
-        );
+    /// Returns an iterator of the [`PathPart`] of this [`Path`] after `prefix`
+    ///
+    /// Returns `None` if the prefix does not match
+    pub fn prefix_match(&self, prefix: &Self) -> Option<impl Iterator<Item = PathPart<'_>> + '_> {
+        let diff = itertools::diff_with(self.parts(), prefix.parts(), |a, b| a == b);
 
         match diff {
             // Both were equal
@@ -148,13 +206,12 @@ impl Path {
             // Mismatch or prefix was longer => None
             Some(itertools::Diff::FirstMismatch(_, _, _) | itertools::Diff::Longer(_, _)) => None,
             // Match with remaining
-            Some(itertools::Diff::Shorter(_, back)) => Some(itertools::Either::Right(
-                back.map(|s| PathPart { raw: s.into() }),
-            )),
+            Some(itertools::Diff::Shorter(_, back)) => Some(itertools::Either::Right(back)),
         }
     }
 
-    pub(crate) fn prefix_matches(&self, prefix: &Self) -> bool {
+    /// Returns true if this [`Path`] starts with `prefix`
+    pub fn prefix_matches(&self, prefix: &Self) -> bool {
         self.prefix_match(prefix).is_some()
     }
 
@@ -214,6 +271,20 @@ where
     }
 }
 
+/// Given a filesystem path, convert it to its canonical URL representation,
+/// returning an error if the file doesn't exist on the local filesystem
+pub(crate) fn filesystem_path_to_url(path: impl AsRef<std::path::Path>) -> Result<Url, Error> {
+    let path = path.as_ref().canonicalize().context(CanonicalizeSnafu {
+        path: path.as_ref(),
+    })?;
+
+    match path.is_dir() {
+        true => Url::from_directory_path(&path),
+        false => Url::from_file_path(&path),
+    }
+    .map_err(|_| Error::InvalidPath { path })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +302,22 @@ mod tests {
     fn push_encodes() {
         let location = Path::from_iter(["foo/bar", "baz%2Ftest"]);
         assert_eq!(location.as_ref(), "foo%2Fbar/baz%252Ftest");
+    }
+
+    #[test]
+    fn test_parse() {
+        assert_eq!(Path::parse("/").unwrap().as_ref(), "");
+        assert_eq!(Path::parse("").unwrap().as_ref(), "");
+
+        let err = Path::parse("//").unwrap_err();
+        assert!(matches!(err, Error::EmptySegment { .. }));
+
+        assert_eq!(Path::parse("/foo/bar/").unwrap().as_ref(), "foo/bar");
+        assert_eq!(Path::parse("foo/bar/").unwrap().as_ref(), "foo/bar");
+        assert_eq!(Path::parse("foo/bar").unwrap().as_ref(), "foo/bar");
+
+        let err = Path::parse("foo///bar").unwrap_err();
+        assert!(matches!(err, Error::EmptySegment { .. }));
     }
 
     #[test]

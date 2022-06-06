@@ -1,11 +1,12 @@
 //! An object store implementation for a local filesystem
 use crate::{
-    maybe_spawn_blocking, path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+    maybe_spawn_blocking,
+    path::{filesystem_path_to_url, Path},
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::BoxStream, StreamExt};
-use percent_encoding::percent_decode;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -91,26 +92,9 @@ pub(crate) enum Error {
         source: io::Error,
     },
 
-    #[snafu(display("Path \"{}\" contained non-unicode characters: {}", path, source))]
-    NonUnicode {
-        path: String,
-        source: std::str::Utf8Error,
-    },
-
-    #[snafu(display("Unable to canonicalize path {}: {}", path.display(), source))]
-    UnableToCanonicalize {
-        source: io::Error,
-        path: std::path::PathBuf,
-    },
-
     #[snafu(display("Error seeking file {}: {}", path.display(), source))]
     Seek {
         source: io::Error,
-        path: std::path::PathBuf,
-    },
-
-    #[snafu(display("Unable to convert path \"{}\" to URL", path.display()))]
-    InvalidPath {
         path: std::path::PathBuf,
     },
 
@@ -200,7 +184,7 @@ impl LocalFileSystem {
     pub fn new_with_prefix(prefix: impl AsRef<std::path::Path>) -> Result<Self> {
         Ok(Self {
             config: Arc::new(Config {
-                root: path_to_url(prefix, true)?,
+                root: filesystem_path_to_url(prefix)?,
             }),
         })
     }
@@ -219,15 +203,10 @@ impl Config {
     }
 
     fn filesystem_to_path(&self, location: &std::path::Path) -> Result<Path> {
-        let url = path_to_url(location, false)?;
-        let relative = self.root.make_relative(&url).expect("relative path");
-
-        // Reverse any percent encoding performed by conversion to URL
-        let decoded = percent_decode(relative.as_bytes())
-            .decode_utf8()
-            .context(NonUnicodeSnafu { path: &relative })?;
-
-        Ok(Path::parse(decoded)?)
+        Ok(Path::from_filesystem_path_with_base(
+            location,
+            Some(&self.root),
+        )?)
     }
 }
 
@@ -489,27 +468,6 @@ fn open_file(path: &std::path::PathBuf) -> Result<File> {
         }
     })?;
     Ok(file)
-}
-
-/// Encode a path as a URL
-///
-/// Note: The returned URL is percent encoded
-fn path_to_url(path: impl AsRef<std::path::Path>, is_dir: bool) -> Result<Url, Error> {
-    // Convert to canonical, i.e. absolute representation
-    let canonical = path
-        .as_ref()
-        .canonicalize()
-        .context(UnableToCanonicalizeSnafu {
-            path: path.as_ref(),
-        })?;
-
-    // Convert to file URL
-    let result = match is_dir {
-        true => Url::from_directory_path(&canonical),
-        false => Url::from_file_path(&canonical),
-    };
-
-    result.map_err(|_| Error::InvalidPath { path: canonical })
 }
 
 fn convert_entry(entry: DirEntry, location: Path) -> Result<ObjectMeta> {
