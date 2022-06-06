@@ -154,9 +154,9 @@ impl Path {
 
     /// Convert a filesystem path to a [`Path`] relative to the provided base
     ///
-    /// This will return an error if the path does not exist, contains illegal
-    /// character sequences as defined by [`Path::parse`], or does not start
-    /// with the provided prefix
+    /// This will return an error if the path does not exist on the local filesystem,
+    /// contains illegal character sequences as defined by [`Path::parse`], or `base`
+    /// does not refer to a parent path of `path`
     pub(crate) fn from_filesystem_path_with_base(
         path: impl AsRef<std::path::Path>,
         base: Option<&Url>,
@@ -271,6 +271,8 @@ where
     }
 }
 
+/// Given a filesystem path, convert it to its canonical URL representation,
+/// returning an error if the file doesn't exist on the local filesystem
 pub(crate) fn filesystem_path_to_url(path: impl AsRef<std::path::Path>) -> Result<Url, Error> {
     let path = path.as_ref().canonicalize().context(CanonicalizeSnafu {
         path: path.as_ref(),
