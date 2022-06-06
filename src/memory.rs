@@ -22,12 +22,19 @@ enum Error {
 
     #[snafu(display("Bad range"))]
     BadRange,
+
+    #[snafu(display("Object already exists at that location: {path}"))]
+    AlreadyExists { path: String },
 }
 
 impl From<Error> for super::Error {
     fn from(source: Error) -> Self {
         match source {
             Error::NoDataInMemory { ref path } => Self::NotFound {
+                path: path.into(),
+                source: source.into(),
+            },
+            Error::AlreadyExists { ref path } => Self::AlreadyExists {
                 path: path.into(),
                 source: source.into(),
             },
@@ -152,6 +159,25 @@ impl ObjectStore for InMemory {
             next_token: None,
         })
     }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let data = self.get_bytes(from).await?;
+        self.storage.write().await.insert(to.clone(), data);
+        Ok(())
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        let data = self.get_bytes(from).await?;
+        let mut storage = self.storage.write().await;
+        if storage.contains_key(to) {
+            return Err(Error::AlreadyExists {
+                path: to.to_string(),
+            }
+            .into());
+        }
+        storage.insert(to.clone(), data);
+        Ok(())
+    }
 }
 
 impl InMemory {
@@ -188,8 +214,8 @@ mod tests {
 
     use crate::{
         tests::{
-            get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
+            list_with_delimiter, put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -201,6 +227,8 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
+        copy_if_not_exists(&integration).await.unwrap();
     }
 
     #[tokio::test]

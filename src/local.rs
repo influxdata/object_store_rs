@@ -28,7 +28,9 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to walk dir: {}", source))]
-    UnableToWalkDir { source: walkdir::Error },
+    UnableToWalkDir {
+        source: walkdir::Error,
+    },
 
     #[snafu(display("Unable to access metadata for {}: {}", path, source))]
     UnableToAccessMetadata {
@@ -37,7 +39,9 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to copy data to file: {}", source))]
-    UnableToCopyDataToFile { source: io::Error },
+    UnableToCopyDataToFile {
+        source: io::Error,
+    },
 
     #[snafu(display("Unable to create dir {}: {}", path.display(), source))]
     UnableToCreateDir {
@@ -76,6 +80,13 @@ pub(crate) enum Error {
         actual: usize,
     },
 
+    #[snafu(display("Unable to copy file from {} to {}: {}", from.display(), to.display(), source))]
+    UnableToCopyFile {
+        from: std::path::PathBuf,
+        to: std::path::PathBuf,
+        source: io::Error,
+    },
+
     NotFound {
         path: std::path::PathBuf,
         source: io::Error,
@@ -88,7 +99,14 @@ pub(crate) enum Error {
     },
 
     #[snafu(display("Unable to convert URL \"{}\" to filesystem path", url))]
-    InvalidUrl { url: Url },
+    InvalidUrl {
+        url: Url,
+    },
+
+    AlreadyExists {
+        path: String,
+        source: io::Error,
+    },
 }
 
 impl From<Error> for super::Error {
@@ -96,6 +114,10 @@ impl From<Error> for super::Error {
         match source {
             Error::NotFound { path, source } => Self::NotFound {
                 path: path.to_string_lossy().to_string(),
+                source: source.into(),
+            },
+            Error::AlreadyExists { path, source } => Self::AlreadyExists {
+                path,
                 source: source.into(),
             },
             _ => Self::Generic {
@@ -386,6 +408,49 @@ impl ObjectStore for LocalFileSystem {
         })
         .await
     }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
+
+        maybe_spawn_blocking(move || {
+            std::fs::copy(&from, &to).context(UnableToCopyFileSnafu { from, to })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
+        maybe_spawn_blocking(move || {
+            std::fs::rename(&from, &to).context(UnableToCopyFileSnafu { from, to })?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = self.config.path_to_filesystem(from)?;
+        let to = self.config.path_to_filesystem(to)?;
+
+        maybe_spawn_blocking(move || {
+            std::fs::hard_link(&from, &to).map_err(|err| match err.kind() {
+                io::ErrorKind::AlreadyExists => Error::AlreadyExists {
+                    path: to.to_str().unwrap().to_string(),
+                    source: err,
+                }
+                .into(),
+                _ => Error::UnableToCopyFile {
+                    from,
+                    to,
+                    source: err,
+                }
+                .into(),
+            })
+        })
+        .await
+    }
 }
 
 fn open_file(path: &std::path::PathBuf) -> Result<File> {
@@ -460,8 +525,8 @@ mod tests {
     use crate::test_util::flatten_list_stream;
     use crate::{
         tests::{
-            get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            copy_if_not_exists, get_nonexistent_object, list_uses_directories_correctly,
+            list_with_delimiter, put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -475,6 +540,8 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
+        copy_if_not_exists(&integration).await.unwrap();
     }
 
     #[test]

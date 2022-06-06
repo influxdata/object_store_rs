@@ -81,6 +81,28 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// Prefixes are evaluated on a path segment basis, i.e. `foo/bar/` is a prefix of `foo/bar/x` but not of
     /// `foo/bar_baz/x`.
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult>;
+
+    /// Copy an object from one path to another in the same object store.
+    ///
+    /// If there exists an object at the destination, it will be overwritten.
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()>;
+
+    /// Move an object from one path to another in the same object store.
+    ///
+    /// By default, this is implemented as a copy and then delete source. It may not
+    /// check when deleting source that it was the same object that was originally copied.
+    ///
+    /// If there exists an object at the destination, it will be overwritten.
+    async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        self.copy(from, to).await?;
+        self.delete(from).await?;
+        Ok(())
+    }
+
+    /// Copy an object from one path to another, only if destination is empty.
+    ///
+    /// Will return an error if the destination already has an object.
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()>;
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a
@@ -235,6 +257,15 @@ pub enum Error {
     NotSupported {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+
+    #[snafu(display("Object at location {} already exists: {}", path, source))]
+    AlreadyExists {
+        path: String,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    #[snafu(display("Operation not yet implemented."))]
+    NotImplemented,
 }
 
 #[cfg(test)]
@@ -554,6 +585,69 @@ mod tests {
         assert!(matches!(err, crate::Error::NotFound { .. }));
 
         Ok(storage.get(&location).await?.bytes().await?)
+    }
+
+    pub(crate) async fn rename_and_copy(storage: &DynObjectStore) -> Result<()> {
+        // Create two objects
+        let path1 = Path::from("test1");
+        let path2 = Path::from("test2");
+        let contents1 = Bytes::from("cats");
+        let contents2 = Bytes::from("dogs");
+
+        // copy() make both objects identical
+        storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
+        storage.copy(&path1, &path2).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+
+        // rename() copies contents and deletes original
+        storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
+        storage.rename(&path1, &path2).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+        let result = storage.get(&path1).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
+
+        // Clean up
+        storage.delete(&path2).await?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn copy_if_not_exists(storage: &DynObjectStore) -> Result<()> {
+        // Create two objects
+        let path1 = Path::from("test1");
+        let path2 = Path::from("test2");
+        let contents1 = Bytes::from("cats");
+        let contents2 = Bytes::from("dogs");
+
+        // copy_if_not_exists() errors if destination already exists
+        storage.put(&path1, contents1.clone()).await?;
+        storage.put(&path2, contents2.clone()).await?;
+        let result = storage.copy_if_not_exists(&path1, &path2).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::AlreadyExists { .. }
+        ));
+
+        // copy_if_not_exists() copies contents and allows deleting original
+        storage.delete(&path2).await?;
+        storage.copy_if_not_exists(&path1, &path2).await?;
+        storage.delete(&path1).await?;
+        let new_contents = storage.get(&path2).await?.bytes().await?;
+        assert_eq!(&new_contents, &contents1);
+        let result = storage.get(&path1).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::Error::NotFound { .. }));
+
+        // Clean up
+        storage.delete(&path2).await?;
+
+        Ok(())
     }
 
     async fn delete_fixtures(storage: &DynObjectStore) {

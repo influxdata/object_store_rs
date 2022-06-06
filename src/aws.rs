@@ -113,6 +113,20 @@ enum Error {
     },
 
     #[snafu(display(
+        "Unable to copy object. Bucket: {}, From: {}, To: {}, Error: {}",
+        bucket,
+        from,
+        to,
+        source,
+    ))]
+    UnableToCopyObject {
+        source: rusoto_core::RusotoError<rusoto_s3::CopyObjectError>,
+        bucket: String,
+        from: String,
+        to: String,
+    },
+
+    #[snafu(display(
         "Unable to parse last modified date. Bucket: {}, Error: {} ({:?})",
         bucket,
         source,
@@ -370,6 +384,40 @@ impl ObjectStore for AmazonS3 {
                 },
             )
             .await?)
+    }
+
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = from.as_ref();
+        let to = to.as_ref();
+        let bucket_name = self.bucket_name.clone();
+
+        let request_factory = move || rusoto_s3::CopyObjectRequest {
+            bucket: bucket_name.clone(),
+            copy_source: format!("{}/{}", &bucket_name, from),
+            key: to.to_string(),
+            ..Default::default()
+        };
+
+        let s3 = self.client().await;
+
+        s3_request(move || {
+            let (s3, request_factory) = (s3.clone(), request_factory.clone());
+
+            async move { s3.copy_object(request_factory()).await }
+        })
+        .await
+        .context(UnableToCopyObjectSnafu {
+            bucket: &self.bucket_name,
+            from,
+            to,
+        })?;
+
+        Ok(())
+    }
+
+    async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
+        // Will need dynamodb_lock
+        Err(crate::Error::NotImplemented)
     }
 }
 
@@ -736,7 +784,7 @@ mod tests {
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list,
+            put_get_delete_list, rename_and_copy,
         },
         Error as ObjectStoreError, ObjectStore,
     };
@@ -851,6 +899,7 @@ mod tests {
         check_credentials(put_get_delete_list(&integration).await).unwrap();
         check_credentials(list_uses_directories_correctly(&integration).await).unwrap();
         check_credentials(list_with_delimiter(&integration).await).unwrap();
+        check_credentials(rename_and_copy(&integration).await).unwrap();
     }
 
     #[tokio::test]
