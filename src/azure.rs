@@ -188,17 +188,16 @@ impl ObjectStore for MicrosoftAzure {
             .execute()
             .await
             .map_err(|err| {
-                match err.downcast_ref::<azure_core::HttpError>() {
-                    Some(azure_core::HttpError::StatusCode { status, .. }) => {
-                        if status.as_u16() == 404 {
-                            return Error::NotFound {
-                                source: err,
-                                path: location.to_string(),
-                            };
-                        }
+                if let Some(azure_core::HttpError::StatusCode { status, .. }) =
+                    err.downcast_ref::<azure_core::HttpError>()
+                {
+                    if status.as_u16() == 404 {
+                        return Error::NotFound {
+                            source: err,
+                            path: location.to_string(),
+                        };
                     }
-                    _ => {}
-                }
+                };
                 Error::UnableToGetData {
                     source: err,
                     container: self.container_name.clone(),
@@ -220,17 +219,16 @@ impl ObjectStore for MicrosoftAzure {
             .execute()
             .await
             .map_err(|err| {
-                match err.downcast_ref::<azure_core::HttpError>() {
-                    Some(azure_core::HttpError::StatusCode { status, .. }) => {
-                        if status.as_u16() == 404 {
-                            return Error::NotFound {
-                                source: err,
-                                path: location.to_string(),
-                            };
-                        }
+                if let Some(azure_core::HttpError::StatusCode { status, .. }) =
+                    err.downcast_ref::<azure_core::HttpError>()
+                {
+                    if status.as_u16() == 404 {
+                        return Error::NotFound {
+                            source: err,
+                            path: location.to_string(),
+                        };
                     }
-                    _ => {}
-                }
+                };
                 Error::UnableToGetPieceOfData {
                     source: err,
                     container: self.container_name.clone(),
