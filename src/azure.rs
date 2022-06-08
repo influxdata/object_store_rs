@@ -369,7 +369,7 @@ impl ObjectStore for MicrosoftAzure {
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
         let from_url = reqwest::Url::parse(&format!(
-            "{}{}/{}",
+            "{}/{}/{}",
             &self.blob_base_url, self.container_name, from
         ))
         .context(UnableToParseUrlSnafu {
@@ -447,7 +447,11 @@ pub fn new_azure(
     };
 
     let storage_client = storage_account_client.as_storage_client();
-    let blob_base_url = storage_account_client.blob_storage_url().to_string();
+    let blob_base_url = storage_account_client
+        .blob_storage_url()
+        .as_ref()
+        .trim_end_matches('/')
+        .to_string();
 
     let container_name = container_name.into();
 
