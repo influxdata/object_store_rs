@@ -6,7 +6,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
-use azure_storage::core::prelude::*;
+use azure_storage::core::prelude::{AsStorageClient, StorageAccountClient};
 use azure_storage_blobs::blob::Blob;
 use azure_storage_blobs::{
     prelude::{AsBlobClient, AsContainerClient, ContainerClient},
@@ -162,6 +162,15 @@ impl std::fmt::Display for MicrosoftAzure {
     }
 }
 
+fn check_err_not_found(err: &Box<dyn std::error::Error + Send + Sync>) -> bool {
+    if let Some(azure_core::HttpError::StatusCode { status, .. }) =
+        err.downcast_ref::<azure_core::HttpError>()
+    {
+        return status.as_u16() == 404;
+    };
+    false
+}
+
 #[async_trait]
 impl ObjectStore for MicrosoftAzure {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
@@ -188,15 +197,11 @@ impl ObjectStore for MicrosoftAzure {
             .execute()
             .await
             .map_err(|err| {
-                if let Some(azure_core::HttpError::StatusCode { status, .. }) =
-                    err.downcast_ref::<azure_core::HttpError>()
-                {
-                    if status.as_u16() == 404 {
-                        return Error::NotFound {
-                            source: err,
-                            path: location.to_string(),
-                        };
-                    }
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
                 };
                 Error::UnableToGetData {
                     source: err,
@@ -219,15 +224,11 @@ impl ObjectStore for MicrosoftAzure {
             .execute()
             .await
             .map_err(|err| {
-                if let Some(azure_core::HttpError::StatusCode { status, .. }) =
-                    err.downcast_ref::<azure_core::HttpError>()
-                {
-                    if status.as_u16() == 404 {
-                        return Error::NotFound {
-                            source: err,
-                            path: location.to_string(),
-                        };
-                    }
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
                 };
                 Error::UnableToGetPieceOfData {
                     source: err,
@@ -246,9 +247,18 @@ impl ObjectStore for MicrosoftAzure {
             .get_properties()
             .execute()
             .await
-            .context(UnableToHeadDataSnafu {
-                container: &self.container_name,
-                path: location.to_string(),
+            .map_err(|err| {
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
+                };
+                Error::UnableToHeadData {
+                    source: err,
+                    container: self.container_name.clone(),
+                    path: location.to_string(),
+                }
             })?;
 
         convert_object_meta(s.blob)
@@ -450,6 +460,7 @@ pub fn new_azure(
     let blob_base_url = storage_account_client
         .blob_storage_url()
         .as_ref()
+        // make url ending consistent between the emulator and remote storage account
         .trim_end_matches('/')
         .to_string();
 
