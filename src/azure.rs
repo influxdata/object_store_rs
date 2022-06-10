@@ -162,6 +162,7 @@ impl std::fmt::Display for MicrosoftAzure {
     }
 }
 
+#[allow(clippy::borrowed_box)]
 fn check_err_not_found(err: &Box<dyn std::error::Error + Send + Sync>) -> bool {
     if let Some(azure_core::HttpError::StatusCode { status, .. }) =
         err.downcast_ref::<azure_core::HttpError>()
