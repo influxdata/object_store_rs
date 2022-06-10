@@ -385,22 +385,11 @@ mod tests {
         let content_list = flatten_list_stream(storage, None).await?;
         assert!(content_list.is_empty());
 
-        // Azure doesn't report semantic errors
-        let is_azure = store_str.starts_with("MicrosoftAzure");
-
         let err = storage.get(&location).await.unwrap_err();
-        assert!(
-            matches!(err, crate::Error::NotFound { .. }) || is_azure,
-            "{}",
-            err
-        );
+        assert!(matches!(err, crate::Error::NotFound { .. }), "{}", err);
 
         let err = storage.head(&location).await.unwrap_err();
-        assert!(
-            matches!(err, crate::Error::NotFound { .. }) || is_azure,
-            "{}",
-            err
-        );
+        assert!(matches!(err, crate::Error::NotFound { .. }), "{}", err);
 
         // Test handling of paths containing an encoded delimiter
 
