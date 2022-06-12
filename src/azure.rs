@@ -326,15 +326,11 @@ impl ObjectStore for MicrosoftAzure {
                     .blobs
                     .into_iter()
                     .map(convert_object_meta)
-                    .filter(|it| {
-                        it.as_ref()
-                            .unwrap_or(&ObjectMeta {
-                                size: 0,
-                                location: "".into(),
-                                last_modified: chrono::offset::Utc::now(),
-                            })
-                            .size
-                            > 0
+                    .filter(|it| match it {
+                        // This is needed to filter out gen2 directories
+                        // https://docs.microsoft.com/en-us/azure/storage/blobs/data-lake-storage-known-issues#blob-storage-apis
+                        Ok(meta) => meta.size > 0,
+                        Err(_) => true,
                     });
                 Some((Ok(futures::stream::iter(names)), next_state))
             }
