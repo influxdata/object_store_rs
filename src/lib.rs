@@ -110,7 +110,6 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
         match self.copy_if_not_exists(from, to).await {
             Ok(_) => self.delete(from).await,
-            // TODO do we need to do more rigorous error checking?
             other => other,
         }?;
         Ok(())
