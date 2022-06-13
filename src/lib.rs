@@ -26,6 +26,8 @@
 pub mod aws;
 #[cfg(feature = "azure")]
 pub mod azure;
+#[cfg(feature = "azure")]
+pub mod azure_adls2;
 #[cfg(feature = "gcp")]
 pub mod gcp;
 pub mod local;
@@ -103,6 +105,18 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// Will return an error if the destination already has an object.
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()>;
+
+    /// Move an object from one path to another in the same object store.
+    ///
+    /// Will return an error if the destination already has an object.
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        match self.copy_if_not_exists(from, to).await {
+            Ok(_) => self.delete(from).await,
+            // TODO do we need to do more rigorous error checking?
+            other => other,
+        }?;
+        Ok(())
+    }
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a

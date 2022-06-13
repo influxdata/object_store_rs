@@ -77,7 +77,7 @@ enum Error {
     },
 
     #[snafu(display(
-        "Unable to PUT data. Bucket: {}, Location: {}, Error: {} ({:?})",
+        "Unable to PUT data. Container: {}, Location: {}, Error: {} ({:?})",
         container,
         path,
         source,
@@ -90,7 +90,7 @@ enum Error {
     },
 
     #[snafu(display(
-        "Unable to list data. Bucket: {}, Error: {} ({:?})",
+        "Unable to list data. Container: {}, Error: {} ({:?})",
         container,
         source,
         source,
@@ -402,7 +402,7 @@ impl ObjectStore for MicrosoftAzure {
     }
 }
 
-fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
+pub(crate) fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
     let location = Path::parse(blob.name)?;
     let last_modified = blob.properties.last_modified;
     let size = blob
