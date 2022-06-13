@@ -6,7 +6,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
-use azure_storage::core::prelude::*;
+use azure_storage::core::prelude::{AsStorageClient, StorageAccountClient};
 use azure_storage_blobs::blob::Blob;
 use azure_storage_blobs::{
     prelude::{AsBlobClient, AsContainerClient, ContainerClient},
@@ -24,33 +24,105 @@ use std::{convert::TryInto, sync::Arc};
 #[derive(Debug, Snafu)]
 #[allow(missing_docs)]
 enum Error {
-    #[snafu(display("Unable to DELETE data. Location: {}, Error: {}", path, source,))]
-    Delete {
+    #[snafu(display(
+        "Unable to DELETE data. Container: {}, Location: {}, Error: {} ({:?})",
+        container,
+        path,
+        source,
+        source,
+    ))]
+    UnableToDeleteData {
         source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
         path: String,
     },
 
-    #[snafu(display("Unable to GET data. Location: {}, Error: {}", path, source,))]
-    Get {
+    #[snafu(display(
+        "Unable to GET data. Container: {}, Location: {}, Error: {} ({:?})",
+        container,
+        path,
+        source,
+        source,
+    ))]
+    UnableToGetData {
         source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
         path: String,
     },
 
-    #[snafu(display("Unable to HEAD data. Location: {}, Error: {}", path, source,))]
-    Head {
+    #[snafu(display(
+        "Unable to HEAD data. Container: {}, Location: {}, Error: {} ({:?})",
+        container,
+        path,
+        source,
+        source,
+    ))]
+    UnableToHeadData {
         source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
         path: String,
     },
 
-    #[snafu(display("Unable to PUT data. Location: {}, Error: {}", path, source,))]
-    Put {
+    #[snafu(display(
+        "Unable to GET part of the data. Container: {}, Location: {}, Error: {} ({:?})",
+        container,
+        path,
+        source,
+        source,
+    ))]
+    UnableToGetPieceOfData {
         source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
         path: String,
     },
 
-    #[snafu(display("Unable to list data. Error: {}", source))]
-    List {
+    #[snafu(display(
+        "Unable to PUT data. Bucket: {}, Location: {}, Error: {} ({:?})",
+        container,
+        path,
+        source,
+        source,
+    ))]
+    UnableToPutData {
         source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
+        path: String,
+    },
+
+    #[snafu(display(
+        "Unable to list data. Bucket: {}, Error: {} ({:?})",
+        container,
+        source,
+        source,
+    ))]
+    UnableToListData {
+        source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
+    },
+
+    #[snafu(display(
+        "Unable to copy object. Container: {}, From: {}, To: {}, Error: {}",
+        container,
+        from,
+        to,
+        source
+    ))]
+    UnableToCopyFile {
+        source: Box<dyn std::error::Error + Send + Sync>,
+        container: String,
+        from: String,
+        to: String,
+    },
+
+    #[snafu(display("Unable parse source url. Container: {}, Error: {}", container, source))]
+    UnableToParseUrl {
+        source: url::ParseError,
+        container: String,
+    },
+
+    NotFound {
+        path: String,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
     #[cfg(not(feature = "azure_test"))]
@@ -62,9 +134,12 @@ enum Error {
 
 impl From<Error> for super::Error {
     fn from(source: Error) -> Self {
-        Self::Generic {
-            store: "Azure Blob Storage",
-            source: Box::new(source),
+        match source {
+            Error::NotFound { path, source } => Self::NotFound { path, source },
+            _ => Self::Generic {
+                store: "Azure Blob Storage",
+                source: Box::new(source),
+            },
         }
     }
 }
@@ -74,6 +149,7 @@ impl From<Error> for super::Error {
 pub struct MicrosoftAzure {
     container_client: Arc<ContainerClient>,
     container_name: String,
+    blob_base_url: String,
     is_emulator: bool,
 }
 
@@ -86,6 +162,16 @@ impl std::fmt::Display for MicrosoftAzure {
     }
 }
 
+#[allow(clippy::borrowed_box)]
+fn check_err_not_found(err: &Box<dyn std::error::Error + Send + Sync>) -> bool {
+    if let Some(azure_core::HttpError::StatusCode { status, .. }) =
+        err.downcast_ref::<azure_core::HttpError>()
+    {
+        return status.as_u16() == 404;
+    };
+    false
+}
+
 #[async_trait]
 impl ObjectStore for MicrosoftAzure {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
@@ -96,7 +182,8 @@ impl ObjectStore for MicrosoftAzure {
             .put_block_blob(bytes)
             .execute()
             .await
-            .context(PutSnafu {
+            .context(UnableToPutDataSnafu {
+                container: &self.container_name,
                 path: location.to_owned(),
             })?;
 
@@ -110,8 +197,18 @@ impl ObjectStore for MicrosoftAzure {
             .get()
             .execute()
             .await
-            .context(GetSnafu {
-                path: location.to_string(),
+            .map_err(|err| {
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
+                };
+                Error::UnableToGetData {
+                    source: err,
+                    container: self.container_name.clone(),
+                    path: location.to_string(),
+                }
             })?;
 
         Ok(GetResult::Stream(
@@ -127,8 +224,18 @@ impl ObjectStore for MicrosoftAzure {
             .range(range)
             .execute()
             .await
-            .context(GetSnafu {
-                path: location.to_string(),
+            .map_err(|err| {
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
+                };
+                Error::UnableToGetPieceOfData {
+                    source: err,
+                    container: self.container_name.clone(),
+                    path: location.to_string(),
+                }
             })?;
 
         Ok(blob.data)
@@ -141,8 +248,18 @@ impl ObjectStore for MicrosoftAzure {
             .get_properties()
             .execute()
             .await
-            .context(HeadSnafu {
-                path: location.to_string(),
+            .map_err(|err| {
+                if check_err_not_found(&err) {
+                    return Error::NotFound {
+                        source: err,
+                        path: location.to_string(),
+                    };
+                };
+                Error::UnableToHeadData {
+                    source: err,
+                    container: self.container_name.clone(),
+                    path: location.to_string(),
+                }
             })?;
 
         convert_object_meta(s.blob)
@@ -155,7 +272,8 @@ impl ObjectStore for MicrosoftAzure {
             .delete_snapshots_method(DeleteSnapshotsMethod::Include)
             .execute()
             .await
-            .context(DeleteSnafu {
+            .context(UnableToDeleteDataSnafu {
+                container: &self.container_name,
                 path: location.to_string(),
             })?;
 
@@ -190,7 +308,9 @@ impl ObjectStore for MicrosoftAzure {
                     ListState::Start => {}
                 }
 
-                let resp = match request.execute().await.context(ListSnafu) {
+                let resp = match request.execute().await.context(UnableToListDataSnafu {
+                    container: &self.container_name,
+                }) {
                     Ok(resp) => resp,
                     Err(err) => return Some((Err(crate::Error::from(err)), state)),
                 };
@@ -201,7 +321,17 @@ impl ObjectStore for MicrosoftAzure {
                     ListState::Done
                 };
 
-                let names = resp.blobs.blobs.into_iter().map(convert_object_meta);
+                let names = resp
+                    .blobs
+                    .blobs
+                    .into_iter()
+                    .map(convert_object_meta)
+                    .filter(|it| match it {
+                        // This is needed to filter out gen2 directories
+                        // https://docs.microsoft.com/en-us/azure/storage/blobs/data-lake-storage-known-issues#blob-storage-apis
+                        Ok(meta) => meta.size > 0,
+                        Err(_) => true,
+                    });
                 Some((Ok(futures::stream::iter(names)), next_state))
             }
         })
@@ -217,7 +347,9 @@ impl ObjectStore for MicrosoftAzure {
             request = request.prefix(prefix)
         }
 
-        let resp = request.execute().await.context(ListSnafu)?;
+        let resp = request.execute().await.context(UnableToListDataSnafu {
+            container: &self.container_name,
+        })?;
 
         let next_token = resp.next_marker.as_ref().map(|m| m.as_str().to_string());
 
@@ -242,8 +374,27 @@ impl ObjectStore for MicrosoftAzure {
         })
     }
 
-    async fn copy(&self, _from: &Path, _to: &Path) -> Result<()> {
-        Err(crate::Error::NotImplemented)
+    async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_url = reqwest::Url::parse(&format!(
+            "{}/{}/{}",
+            &self.blob_base_url, self.container_name, from
+        ))
+        .context(UnableToParseUrlSnafu {
+            container: &self.container_name,
+        })?;
+
+        self.container_client
+            .as_blob_client(to.as_ref())
+            .copy(&from_url)
+            .execute()
+            .await
+            .context(UnableToCopyFileSnafu {
+                container: &self.container_name,
+                from: from.as_ref(),
+                to: to.as_ref(),
+            })?;
+
+        Ok(())
     }
 
     async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> Result<()> {
@@ -303,6 +454,12 @@ pub fn new_azure(
     };
 
     let storage_client = storage_account_client.as_storage_client();
+    let blob_base_url = storage_account_client
+        .blob_storage_url()
+        .as_ref()
+        // make url ending consistent between the emulator and remote storage account
+        .trim_end_matches('/')
+        .to_string();
 
     let container_name = container_name.into();
 
@@ -311,6 +468,7 @@ pub fn new_azure(
     Ok(MicrosoftAzure {
         container_client,
         container_name,
+        blob_base_url,
         is_emulator,
     })
 }
@@ -318,7 +476,9 @@ pub fn new_azure(
 #[cfg(test)]
 mod tests {
     use crate::azure::new_azure;
-    use crate::tests::{list_uses_directories_correctly, list_with_delimiter, put_get_delete_list};
+    use crate::tests::{
+        list_uses_directories_correctly, list_with_delimiter, put_get_delete_list, rename_and_copy,
+    };
     use std::env;
 
     #[derive(Debug)]
@@ -395,5 +555,6 @@ mod tests {
         put_get_delete_list(&integration).await.unwrap();
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
+        rename_and_copy(&integration).await.unwrap();
     }
 }
