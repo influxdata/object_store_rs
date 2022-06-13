@@ -381,7 +381,7 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        let from_url = self.from_url(from)?;
+        let from_url = self.get_from_url(from)?;
         self.container_client
             .as_blob_client(to.as_ref())
             .copy(&from_url)
@@ -396,7 +396,7 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        let from_url = self.from_url(from)?;
+        let from_url = self.get_from_url(from)?;
         self.container_client
             .as_blob_client(to.as_ref())
             .copy(&from_url)
@@ -427,7 +427,7 @@ impl ObjectStore for MicrosoftAzure {
 }
 
 impl MicrosoftAzure {
-    fn from_url(&self, from: &Path) -> Result<reqwest::Url> {
+    fn get_from_url(&self, from: &Path) -> Result<reqwest::Url> {
         Ok(reqwest::Url::parse(&format!(
             "{}/{}/{}",
             &self.blob_base_url, self.container_name, from
