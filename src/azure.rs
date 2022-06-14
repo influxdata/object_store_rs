@@ -125,6 +125,11 @@ enum Error {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
+    AlreadyExists {
+        path: String,
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
     #[cfg(not(feature = "azure_test"))]
     #[snafu(display(
         "Azurite (azure emulator) support not compiled in, please add `azure_test` feature"
@@ -136,6 +141,7 @@ impl From<Error> for super::Error {
     fn from(source: Error) -> Self {
         match source {
             Error::NotFound { path, source } => Self::NotFound { path, source },
+            Error::AlreadyExists { path, source } => Self::AlreadyExists { path, source },
             _ => Self::Generic {
                 store: "Azure Blob Storage",
                 source: Box::new(source),
@@ -375,14 +381,7 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        let from_url = reqwest::Url::parse(&format!(
-            "{}/{}/{}",
-            &self.blob_base_url, self.container_name, from
-        ))
-        .context(UnableToParseUrlSnafu {
-            container: &self.container_name,
-        })?;
-
+        let from_url = self.get_copy_from_url(from)?;
         self.container_client
             .as_blob_client(to.as_ref())
             .copy(&from_url)
@@ -393,12 +392,49 @@ impl ObjectStore for MicrosoftAzure {
                 from: from.as_ref(),
                 to: to.as_ref(),
             })?;
-
         Ok(())
     }
 
-    async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> Result<()> {
-        Err(crate::Error::NotImplemented)
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_url = self.get_copy_from_url(from)?;
+        self.container_client
+            .as_blob_client(to.as_ref())
+            .copy(&from_url)
+            .if_match_condition(IfMatchCondition::NotMatch("*".to_string()))
+            .execute()
+            .await
+            .map_err(|err| {
+                if let Some(azure_core::HttpError::StatusCode { status, .. }) =
+                    err.downcast_ref::<azure_core::HttpError>()
+                {
+                    if status.as_u16() == 409 {
+                        return Error::AlreadyExists {
+                            source: err,
+                            path: to.to_string(),
+                        };
+                    };
+                };
+                Error::UnableToCopyFile {
+                    source: err,
+                    container: self.container_name.clone(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                }
+            })?;
+        Ok(())
+    }
+}
+
+impl MicrosoftAzure {
+    /// helper function to create a source url for copy function
+    fn get_copy_from_url(&self, from: &Path) -> Result<reqwest::Url> {
+        Ok(reqwest::Url::parse(&format!(
+            "{}/{}/{}",
+            &self.blob_base_url, self.container_name, from
+        ))
+        .context(UnableToParseUrlSnafu {
+            container: &self.container_name,
+        })?)
     }
 }
 
@@ -477,7 +513,8 @@ pub fn new_azure(
 mod tests {
     use crate::azure::new_azure;
     use crate::tests::{
-        list_uses_directories_correctly, list_with_delimiter, put_get_delete_list, rename_and_copy,
+        copy_if_not_exists, list_uses_directories_correctly, list_with_delimiter,
+        put_get_delete_list, rename_and_copy,
     };
     use std::env;
 
@@ -556,5 +593,6 @@ mod tests {
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
+        copy_if_not_exists(&integration).await.unwrap();
     }
 }

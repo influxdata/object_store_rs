@@ -95,14 +95,21 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// If there exists an object at the destination, it will be overwritten.
     async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         self.copy(from, to).await?;
-        self.delete(from).await?;
-        Ok(())
+        self.delete(from).await
     }
 
     /// Copy an object from one path to another, only if destination is empty.
     ///
     /// Will return an error if the destination already has an object.
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()>;
+
+    /// Move an object from one path to another in the same object store.
+    ///
+    /// Will return an error if the destination already has an object.
+    async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        self.copy_if_not_exists(from, to).await?;
+        self.delete(from).await
+    }
 }
 
 /// Result of a list call that includes objects, prefixes (directories) and a
@@ -607,6 +614,8 @@ mod tests {
     }
 
     pub(crate) async fn copy_if_not_exists(storage: &DynObjectStore) -> Result<()> {
+        let store_str = storage.to_string();
+
         // Create two objects
         let path1 = Path::from("test1");
         let path2 = Path::from("test2");
@@ -617,11 +626,15 @@ mod tests {
         storage.put(&path1, contents1.clone()).await?;
         storage.put(&path2, contents2.clone()).await?;
         let result = storage.copy_if_not_exists(&path1, &path2).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            crate::Error::AlreadyExists { .. }
-        ));
+        // right now azurite does not seem to honor the relevant headers for copy-if-not-exists
+        // https://github.com/Azure/Azurite/issues/1543
+        if !store_str.starts_with("MicrosoftAzureEmulator") {
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                crate::Error::AlreadyExists { .. }
+            ));
+        }
 
         // copy_if_not_exists() copies contents and allows deleting original
         storage.delete(&path2).await?;
