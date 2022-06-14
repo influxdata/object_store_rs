@@ -614,6 +614,8 @@ mod tests {
     }
 
     pub(crate) async fn copy_if_not_exists(storage: &DynObjectStore) -> Result<()> {
+        let store_str = storage.to_string();
+
         // Create two objects
         let path1 = Path::from("test1");
         let path2 = Path::from("test2");
@@ -624,11 +626,13 @@ mod tests {
         storage.put(&path1, contents1.clone()).await?;
         storage.put(&path2, contents2.clone()).await?;
         let result = storage.copy_if_not_exists(&path1, &path2).await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            crate::Error::AlreadyExists { .. }
-        ));
+        if !store_str.starts_with("MicrosoftAzureEmulator") {
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                crate::Error::AlreadyExists { .. }
+            ));
+        }
 
         // copy_if_not_exists() copies contents and allows deleting original
         storage.delete(&path2).await?;
