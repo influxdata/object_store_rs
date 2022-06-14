@@ -95,8 +95,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// If there exists an object at the destination, it will be overwritten.
     async fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         self.copy(from, to).await?;
-        self.delete(from).await?;
-        Ok(())
+        self.delete(from).await
     }
 
     /// Copy an object from one path to another, only if destination is empty.
@@ -108,11 +107,8 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// Will return an error if the destination already has an object.
     async fn rename_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
-        match self.copy_if_not_exists(from, to).await {
-            Ok(_) => self.delete(from).await,
-            other => other,
-        }?;
-        Ok(())
+        self.copy_if_not_exists(from, to).await?;
+        self.delete(from).await
     }
 }
 
