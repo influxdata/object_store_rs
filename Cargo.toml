@@ -10,6 +10,7 @@ keywords = [
     "storage",
     "cloud",
 ]
+repository = "https://github.com/influxdata/object_store_rs"
 
 [package.metadata.docs.rs]
 all-features = true
