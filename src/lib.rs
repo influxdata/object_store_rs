@@ -24,6 +24,8 @@
 
 #[cfg(feature = "aws")]
 pub mod aws;
+#[cfg(feature = "awssdk")]
+pub mod awssdk;
 #[cfg(feature = "azure")]
 pub mod azure;
 #[cfg(feature = "gcp")]
