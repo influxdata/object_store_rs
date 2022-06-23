@@ -626,15 +626,11 @@ mod tests {
         storage.put(&path1, contents1.clone()).await?;
         storage.put(&path2, contents2.clone()).await?;
         let result = storage.copy_if_not_exists(&path1, &path2).await;
-        // right now azurite does not seem to honor the relevant headers for copy-if-not-exists
-        // https://github.com/Azure/Azurite/issues/1543
-        if !store_str.starts_with("MicrosoftAzureEmulator") {
-            assert!(result.is_err());
-            assert!(matches!(
-                result.unwrap_err(),
-                crate::Error::AlreadyExists { .. }
-            ));
-        }
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::Error::AlreadyExists { .. }
+        ));
 
         // copy_if_not_exists() copies contents and allows deleting original
         storage.delete(&path2).await?;
