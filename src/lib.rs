@@ -614,8 +614,6 @@ mod tests {
     }
 
     pub(crate) async fn copy_if_not_exists(storage: &DynObjectStore) -> Result<()> {
-        let store_str = storage.to_string();
-
         // Create two objects
         let path1 = Path::from("test1");
         let path2 = Path::from("test2");
