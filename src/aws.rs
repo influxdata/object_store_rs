@@ -358,7 +358,6 @@ impl ObjectStore for AmazonS3 {
             .await?
             .try_fold(
                 ListResult {
-                    next_token: None,
                     common_prefixes: vec![],
                     objects: vec![],
                 },
@@ -611,13 +610,11 @@ impl AmazonS3 {
         prefix: Option<&Path>,
         delimiter: Option<String>,
     ) -> Result<BoxStream<'_, Result<rusoto_s3::ListObjectsV2Output>>> {
-        #[derive(Clone)]
         enum ListState {
             Start,
             HasMore(String),
             Done,
         }
-        use ListState::*;
 
         let prefix = format_prefix(prefix);
         let bucket = self.bucket_name.clone();
@@ -635,21 +632,21 @@ impl AmazonS3 {
             let s3 = s3.clone();
 
             async move {
-                let continuation_token = match state.clone() {
-                    HasMore(continuation_token) => Some(continuation_token),
-                    Done => {
+                let continuation_token = match &state {
+                    ListState::HasMore(continuation_token) => Some(continuation_token),
+                    ListState::Done => {
                         return None;
                     }
                     // If this is the first request we've made, we don't need to make any
                     // modifications to the request
-                    Start => None,
+                    ListState::Start => None,
                 };
 
                 let resp = s3_request(move || {
                     let (s3, request_factory, continuation_token) = (
                         s3.clone(),
                         request_factory.clone(),
-                        continuation_token.clone(),
+                        continuation_token.cloned(),
                     );
 
                     async move {
