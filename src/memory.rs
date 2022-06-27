@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{stream::BoxStream, StreamExt};
+use parking_lot::RwLock;
 use snafu::{ensure, OptionExt, Snafu};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ops::Range;
-use tokio::sync::RwLock;
 
 /// A specialized `Error` for in-memory object store-related errors
 #[derive(Debug, Snafu)]
@@ -62,7 +62,7 @@ impl std::fmt::Display for InMemory {
 #[async_trait]
 impl ObjectStore for InMemory {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        self.storage.write().await.insert(location.clone(), bytes);
+        self.storage.write().insert(location.clone(), bytes);
         Ok(())
     }
 
@@ -93,14 +93,14 @@ impl ObjectStore for InMemory {
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        self.storage.write().await.remove(location);
+        self.storage.write().remove(location);
         Ok(())
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
         let last_modified = Utc::now();
 
-        let storage = self.storage.read().await;
+        let storage = self.storage.read();
         let values: Vec<_> = storage
             .iter()
             .filter(move |(key, _)| prefix.map(|p| key.prefix_matches(p)).unwrap_or(true))
@@ -129,7 +129,7 @@ impl ObjectStore for InMemory {
         // Only objects in this base level should be returned in the
         // response. Otherwise, we just collect the common prefixes.
         let mut objects = vec![];
-        for (k, v) in self.storage.read().await.range((prefix)..) {
+        for (k, v) in self.storage.read().range((prefix)..) {
             let mut parts = match k.prefix_match(prefix) {
                 Some(parts) => parts,
                 None => break,
@@ -161,13 +161,13 @@ impl ObjectStore for InMemory {
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
         let data = self.get_bytes(from).await?;
-        self.storage.write().await.insert(to.clone(), data);
+        self.storage.write().insert(to.clone(), data);
         Ok(())
     }
 
     async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
         let data = self.get_bytes(from).await?;
-        let mut storage = self.storage.write().await;
+        let mut storage = self.storage.write();
         if storage.contains_key(to) {
             return Err(Error::AlreadyExists {
                 path: to.to_string(),
@@ -187,7 +187,7 @@ impl InMemory {
 
     /// Creates a clone of the store
     pub async fn clone(&self) -> Self {
-        let storage = self.storage.read().await;
+        let storage = self.storage.read();
         let storage = storage.clone();
 
         Self {
@@ -196,7 +196,7 @@ impl InMemory {
     }
 
     async fn get_bytes(&self, location: &Path) -> Result<Bytes> {
-        let storage = self.storage.read().await;
+        let storage = self.storage.read();
         let bytes = storage
             .get(location)
             .cloned()
