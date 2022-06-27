@@ -227,6 +227,8 @@ impl ObjectStore for GoogleCloudStorage {
             prefix: format_prefix(prefix),
             ..Default::default()
         };
+
+        // Note: cloud_storage automatically handles pagination
         let object_lists = self
             .client
             .object()
@@ -258,6 +260,7 @@ impl ObjectStore for GoogleCloudStorage {
             ..Default::default()
         };
 
+        // Note: cloud_storage automatically handles pagination
         let mut object_lists = Box::pin(
             self.client
                 .object()
@@ -272,7 +275,6 @@ impl ObjectStore for GoogleCloudStorage {
             None => ListResult {
                 objects: vec![],
                 common_prefixes: vec![],
-                next_token: None,
             },
             Some(list_response) => {
                 let list_response = list_response.context(UnableToStreamListDataSnafu {
@@ -294,7 +296,6 @@ impl ObjectStore for GoogleCloudStorage {
                 ListResult {
                     objects,
                     common_prefixes,
-                    next_token: list_response.next_page_token,
                 }
             }
         };

@@ -156,7 +156,6 @@ impl ObjectStore for InMemory {
         Ok(ListResult {
             objects,
             common_prefixes: common_prefixes.into_iter().collect(),
-            next_token: None,
         })
     }
 

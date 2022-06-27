@@ -401,7 +401,6 @@ impl ObjectStore for LocalFileSystem {
             }
 
             Ok(ListResult {
-                next_token: None,
                 common_prefixes: common_prefixes.into_iter().collect(),
                 objects,
             })

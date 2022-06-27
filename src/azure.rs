@@ -7,6 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
 use azure_storage::core::prelude::{AsStorageClient, StorageAccountClient};
+use azure_storage_blobs::blob::responses::ListBlobsResponse;
 use azure_storage_blobs::blob::Blob;
 use azure_storage_blobs::{
     prelude::{AsBlobClient, AsContainerClient, ContainerClient},
@@ -18,6 +19,7 @@ use futures::{
     StreamExt, TryStreamExt,
 };
 use snafu::{ResultExt, Snafu};
+use std::collections::BTreeSet;
 use std::{convert::TryInto, sync::Arc};
 
 /// A specialized `Error` for Azure object store-related errors
@@ -248,7 +250,7 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        let s = self
+        let res = self
             .container_client
             .as_blob_client(location.as_ref())
             .get_properties()
@@ -268,7 +270,10 @@ impl ObjectStore for MicrosoftAzure {
                 }
             })?;
 
-        convert_object_meta(s.blob)
+        convert_object_meta(res.blob)?.ok_or_else(|| super::Error::NotFound {
+            path: location.to_string(),
+            source: "is directory".to_string().into(),
+        })
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
@@ -287,95 +292,48 @@ impl ObjectStore for MicrosoftAzure {
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        #[derive(Clone)]
-        enum ListState {
-            Start,
-            HasMore(String),
-            Done,
-        }
-
-        let prefix_raw = format_prefix(prefix);
-
-        Ok(stream::unfold(ListState::Start, move |state| {
-            let mut request = self.container_client.list_blobs();
-
-            if let Some(p) = prefix_raw.as_deref() {
-                request = request.prefix(p);
-            }
-
-            async move {
-                match state {
-                    ListState::HasMore(ref marker) => {
-                        request = request.next_marker(marker as &str);
-                    }
-                    ListState::Done => {
-                        return None;
-                    }
-                    ListState::Start => {}
-                }
-
-                let resp = match request.execute().await.context(UnableToListDataSnafu {
-                    container: &self.container_name,
-                }) {
-                    Ok(resp) => resp,
-                    Err(err) => return Some((Err(crate::Error::from(err)), state)),
-                };
-
-                let next_state = if let Some(marker) = resp.next_marker {
-                    ListState::HasMore(marker.as_str().to_string())
-                } else {
-                    ListState::Done
-                };
-
+        let stream = self
+            .list_impl(prefix, false)
+            .await?
+            .map_ok(|resp| {
                 let names = resp
                     .blobs
                     .blobs
                     .into_iter()
-                    .map(convert_object_meta)
-                    .filter(|it| match it {
-                        // This is needed to filter out gen2 directories
-                        // https://docs.microsoft.com/en-us/azure/storage/blobs/data-lake-storage-known-issues#blob-storage-apis
-                        Ok(meta) => meta.size > 0,
-                        Err(_) => true,
-                    });
-                Some((Ok(futures::stream::iter(names)), next_state))
-            }
-        })
-        .try_flatten()
-        .boxed())
+                    .filter_map(|blob| convert_object_meta(blob).transpose());
+                futures::stream::iter(names)
+            })
+            .try_flatten()
+            .boxed();
+
+        Ok(stream)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
-        let mut request = self.container_client.list_blobs();
+        let mut stream = self.list_impl(prefix, true).await?;
 
-        request = request.delimiter(Delimiter::new(DELIMITER));
-        if let Some(prefix) = format_prefix(prefix) {
-            request = request.prefix(prefix)
+        let mut common_prefixes = BTreeSet::new();
+        let mut objects = Vec::new();
+
+        while let Some(res) = stream.next().await {
+            let response = res?;
+
+            let prefixes = response.blobs.blob_prefix.unwrap_or_default();
+            for p in prefixes {
+                common_prefixes.insert(Path::parse(&p.name)?);
+            }
+
+            let blobs = response.blobs.blobs;
+            objects.reserve(blobs.len());
+            for blob in blobs {
+                if let Some(meta) = convert_object_meta(blob)? {
+                    objects.push(meta);
+                }
+            }
         }
 
-        let resp = request.execute().await.context(UnableToListDataSnafu {
-            container: &self.container_name,
-        })?;
-
-        let next_token = resp.next_marker.as_ref().map(|m| m.as_str().to_string());
-
-        let prefixes = resp.blobs.blob_prefix.unwrap_or_default();
-
-        let common_prefixes = prefixes
-            .iter()
-            .map(|p| Path::parse(&p.name))
-            .collect::<Result<_, _>>()?;
-
-        let objects = resp
-            .blobs
-            .blobs
-            .into_iter()
-            .map(convert_object_meta)
-            .collect::<Result<_>>()?;
-
         Ok(ListResult {
-            next_token,
-            common_prefixes,
+            common_prefixes: common_prefixes.into_iter().collect(),
             objects,
         })
     }
@@ -436,9 +394,64 @@ impl MicrosoftAzure {
             container: &self.container_name,
         })?)
     }
+
+    async fn list_impl(
+        &self,
+        prefix: Option<&Path>,
+        delimiter: bool,
+    ) -> Result<BoxStream<'_, Result<ListBlobsResponse>>> {
+        enum ListState {
+            Start,
+            HasMore(String),
+            Done,
+        }
+
+        let prefix_raw = format_prefix(prefix);
+
+        Ok(stream::unfold(ListState::Start, move |state| {
+            let mut request = self.container_client.list_blobs();
+
+            if let Some(p) = prefix_raw.as_deref() {
+                request = request.prefix(p);
+            }
+
+            if delimiter {
+                request = request.delimiter(Delimiter::new(DELIMITER));
+            }
+
+            async move {
+                match state {
+                    ListState::HasMore(ref marker) => {
+                        request = request.next_marker(marker as &str);
+                    }
+                    ListState::Done => {
+                        return None;
+                    }
+                    ListState::Start => {}
+                }
+
+                let resp = match request.execute().await.context(UnableToListDataSnafu {
+                    container: &self.container_name,
+                }) {
+                    Ok(resp) => resp,
+                    Err(err) => return Some((Err(crate::Error::from(err)), state)),
+                };
+
+                let next_state = if let Some(marker) = &resp.next_marker {
+                    ListState::HasMore(marker.as_str().to_string())
+                } else {
+                    ListState::Done
+                };
+
+                Some((Ok(resp), next_state))
+            }
+        })
+        .boxed())
+    }
 }
 
-fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
+/// Returns `None` if is a directory
+fn convert_object_meta(blob: Blob) -> Result<Option<ObjectMeta>> {
     let location = Path::parse(blob.name)?;
     let last_modified = blob.properties.last_modified;
     let size = blob
@@ -447,11 +460,13 @@ fn convert_object_meta(blob: Blob) -> Result<ObjectMeta> {
         .try_into()
         .expect("unsupported size on this platform");
 
-    Ok(ObjectMeta {
+    // This is needed to filter out gen2 directories
+    // https://docs.microsoft.com/en-us/azure/storage/blobs/data-lake-storage-known-issues#blob-storage-apis
+    Ok((size > 0).then(|| ObjectMeta {
         location,
         last_modified,
         size,
-    })
+    }))
 }
 
 #[cfg(feature = "azure_test")]

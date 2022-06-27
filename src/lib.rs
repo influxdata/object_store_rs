@@ -117,8 +117,6 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
 /// 1,000 objects based on the underlying object storage's limitations.
 #[derive(Debug)]
 pub struct ListResult {
-    /// Token passed to the API for the next page of list results.
-    pub next_token: Option<String>,
     /// Prefixes that are common (like directories)
     pub common_prefixes: Vec<Path>,
     /// Object metadata for the listing
