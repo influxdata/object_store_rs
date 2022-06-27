@@ -1,9 +1,7 @@
 //! A throttling object store wrapper
+use parking_lot::Mutex;
 use std::ops::Range;
-use std::{
-    convert::TryInto,
-    sync::{Arc, Mutex},
-};
+use std::{convert::TryInto, sync::Arc};
 
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
@@ -110,13 +108,13 @@ impl<T: ObjectStore> ThrottledStore<T> {
     where
         F: Fn(&mut ThrottleConfig),
     {
-        let mut guard = self.config.lock().expect("lock poissened");
+        let mut guard = self.config.lock();
         f(&mut guard)
     }
 
     /// Return copy of current config.
     pub fn config(&self) -> ThrottleConfig {
-        *self.config.lock().expect("lock poissened")
+        *self.config.lock()
     }
 }
 
