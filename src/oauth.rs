@@ -1,18 +1,68 @@
 use crate::token::TemporaryToken;
 use reqwest::{Client, Method};
+use ring::signature::RsaKeyPair;
 use snafu::{ResultExt, Snafu};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Unable to decode service account key: {}", source))]
-    DecodeKey { source: jsonwebtoken::errors::Error },
+    #[snafu(display("No RSA key found in pem file"))]
+    MissingKey,
 
-    #[snafu(display("Unable to encode jwt: {}", source))]
-    EncodeJwt { source: jsonwebtoken::errors::Error },
+    #[snafu(display("Invalid RSA key: {}", source), context(false))]
+    InvalidKey { source: ring::error::KeyRejected },
+
+    #[snafu(display("Error signing jwt: {}", source))]
+    Sign { source: ring::error::Unspecified },
+
+    #[snafu(display("Error encoding jwt payload: {}", source))]
+    Encode { source: serde_json::Error },
+
+    #[snafu(display("Unsupported key encoding: {}", encoding))]
+    UnsupportedKey { encoding: String },
 
     #[snafu(display("Error performing token request: {}", source))]
     TokenRequest { source: reqwest::Error },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct JwtHeader {
+    /// The type of JWS: it can only be "JWT" here
+    ///
+    /// Defined in [RFC7515#4.1.9](https://tools.ietf.org/html/rfc7515#section-4.1.9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typ: Option<String>,
+    /// The algorithm used
+    ///
+    /// Defined in [RFC7515#4.1.1](https://tools.ietf.org/html/rfc7515#section-4.1.1).
+    pub alg: String,
+    /// Content type
+    ///
+    /// Defined in [RFC7519#5.2](https://tools.ietf.org/html/rfc7519#section-5.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cty: Option<String>,
+    /// JSON Key URL
+    ///
+    /// Defined in [RFC7515#4.1.2](https://tools.ietf.org/html/rfc7515#section-4.1.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jku: Option<String>,
+    /// Key ID
+    ///
+    /// Defined in [RFC7515#4.1.4](https://tools.ietf.org/html/rfc7515#section-4.1.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
+    /// X.509 URL
+    ///
+    /// Defined in [RFC7515#4.1.5](https://tools.ietf.org/html/rfc7515#section-4.1.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x5u: Option<String>,
+    /// X.509 certificate thumbprint
+    ///
+    /// Defined in [RFC7515#4.1.7](https://tools.ietf.org/html/rfc7515#section-4.1.7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x5t: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -34,28 +84,42 @@ struct TokenResponse {
 #[derive(Debug)]
 pub struct OAuthProvider {
     issuer: String,
-    private_key: String,
     scope: String,
     audience: String,
+    key_pair: RsaKeyPair,
+    jwt_header: String,
+    random: ring::rand::SystemRandom,
 }
 
 impl OAuthProvider {
     /// Create a new [`OAuthProvider`]
-    pub fn new(issuer: String, private_key: String, scope: String, audience: String) -> Self {
-        Self {
+    pub fn new(
+        issuer: String,
+        private_key_pem: String,
+        scope: String,
+        audience: String,
+    ) -> Result<Self> {
+        let key_pair = decode_first_rsa_key(private_key_pem)?;
+        let jwt_header = b64_encode_obj(&JwtHeader {
+            alg: "RS256".to_string(),
+            ..Default::default()
+        })?;
+
+        Ok(Self {
             issuer,
-            private_key,
+            key_pair,
             scope,
             audience,
-        }
+            jwt_header,
+            random: ring::rand::SystemRandom::new(),
+        })
     }
 
     /// Fetch a fresh token
-    pub async fn fetch_token(&self, client: &Client) -> Result<TemporaryToken<String>, Error> {
+    pub async fn fetch_token(&self, client: &Client) -> Result<TemporaryToken<String>> {
         let now = seconds_since_epoch();
         let exp = now + 3600;
 
-        // https://cloud.google.com/storage/docs/authentication#oauth-scopes
         let claims = TokenClaims {
             iss: &self.issuer,
             scope: &self.scope,
@@ -63,15 +127,22 @@ impl OAuthProvider {
             exp,
             iat: now,
         };
-        let header = jsonwebtoken::Header {
-            alg: jsonwebtoken::Algorithm::RS256,
-            ..Default::default()
-        };
-        let private_key_bytes = self.private_key.as_bytes();
 
-        let private_key =
-            jsonwebtoken::EncodingKey::from_rsa_pem(private_key_bytes).context(DecodeKeySnafu)?;
-        let jwt = jsonwebtoken::encode(&header, &claims, &private_key).context(EncodeJwtSnafu)?;
+        let claim_str = b64_encode_obj(&claims)?;
+        let message = [self.jwt_header.as_ref(), claim_str.as_ref()].join(".");
+        let mut sig_bytes = vec![0; self.key_pair.public_modulus_len()];
+        self.key_pair
+            .sign(
+                &ring::signature::RSA_PKCS1_SHA256,
+                &self.random,
+                message.as_bytes(),
+                &mut sig_bytes,
+            )
+            .context(SignSnafu)?;
+
+        let signature = base64::encode_config(&sig_bytes, base64::URL_SAFE_NO_PAD);
+        let jwt = [message, signature].join(".");
+
         let body = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
             ("assertion", &jwt),
@@ -104,4 +175,24 @@ fn seconds_since_epoch() -> u64 {
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+fn decode_first_rsa_key(private_key_pem: String) -> Result<RsaKeyPair> {
+    use rustls_pemfile::Item;
+    use std::io::{BufReader, Cursor};
+
+    let mut cursor = Cursor::new(private_key_pem);
+    let mut reader = BufReader::new(&mut cursor);
+
+    // Reading from string is infallible
+    match rustls_pemfile::read_one(&mut reader).unwrap() {
+        Some(Item::PKCS8Key(key)) => Ok(RsaKeyPair::from_pkcs8(&key)?),
+        Some(Item::RSAKey(key)) => Ok(RsaKeyPair::from_der(&key)?),
+        _ => Err(Error::MissingKey),
+    }
+}
+
+fn b64_encode_obj<T: serde::Serialize>(obj: &T) -> Result<String> {
+    let string = serde_json::to_string(obj).context(EncodeSnafu)?;
+    Ok(base64::encode_config(string, base64::URL_SAFE_NO_PAD))
 }

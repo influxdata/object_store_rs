@@ -453,7 +453,7 @@ pub fn new_gcs(
         credentials.private_key,
         scope.to_string(),
         audience,
-    );
+    )?;
 
     let bucket_name = bucket_name.into();
     let encoded_bucket_name = percent_encode(bucket_name.as_bytes(), NON_ALPHANUMERIC).to_string();

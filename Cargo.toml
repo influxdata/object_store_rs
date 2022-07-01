@@ -27,7 +27,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures = "0.3"
 serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
 serde_json = { version = "1.0", default-features = false, optional = true }
-jsonwebtoken = { version = "8.1", default-features = false, features = ["use_pem"] }
+rustls-pemfile = { version = "1.0", default-features = false, optional = true }
+ring = { version = "0.16", default-features = false, features = ["std"] }
+base64 = { version = "0.13", default-features = false, optional = true }
 # for rusoto
 hyper = { version = "0.14", optional = true, default-features = false }
 # for rusoto
@@ -50,7 +52,7 @@ walkdir = "2"
 [features]
 azure = ["azure_core", "azure_storage_blobs", "azure_storage", "reqwest"]
 azure_test = ["azure", "azure_core/azurite_workaround", "azure_storage/azurite_workaround", "azure_storage_blobs/azurite_workaround"]
-gcp = ["serde", "serde_json", "reqwest", "reqwest/json", "reqwest/stream", "chrono/serde"]
+gcp = ["serde", "serde_json", "reqwest", "reqwest/json", "reqwest/stream", "chrono/serde", "rustls-pemfile", "base64"]
 aws = ["rusoto_core", "rusoto_credential", "rusoto_s3", "hyper", "hyper-rustls"]
 
 [dev-dependencies] # In alphabetical order
