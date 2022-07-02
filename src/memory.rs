@@ -1,5 +1,5 @@
 //! An in-memory object store implementation
-use crate::MultiPartUpload;
+use crate::UploadId;
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -72,12 +72,23 @@ impl ObjectStore for InMemory {
         Ok(())
     }
 
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
-        Ok(Box::new(InMemoryUpload {
-            location: location.clone(),
-            data: Vec::new(),
-            storage: Arc::clone(&self.storage),
-        }))
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+        Ok((
+            String::new(),
+            Box::new(InMemoryUpload {
+                location: location.clone(),
+                data: Vec::new(),
+                storage: Arc::clone(&self.storage),
+            }),
+        ))
+    }
+
+    async fn cleanup_upload(&self, _location: &Path, _upload_id: &UploadId) -> Result<()> {
+        // Nothing to clean up
+        Ok(())
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -225,13 +236,6 @@ struct InMemoryUpload {
     location: Path,
     data: Vec<u8>,
     storage: Arc<RwLock<BTreeMap<Path, Bytes>>>,
-}
-
-#[async_trait]
-impl MultiPartUpload for InMemoryUpload {
-    async fn abort(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 impl AsyncWrite for InMemoryUpload {

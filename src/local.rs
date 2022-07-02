@@ -1,9 +1,8 @@
 //! An object store implementation for a local filesystem
-use crate::MultiPartUpload;
 use crate::{
     maybe_spawn_blocking,
     path::{filesystem_path_to_url, Path},
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result,
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result, UploadId,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -232,15 +231,31 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
         let path = self.config.path_to_filesystem(location)?;
 
         let file = open_writable_file(&path)?;
 
-        Ok(Box::new(LocalUpload {
-            inner_write: None,
-            file: Arc::new(file),
-        }))
+        Ok((
+            String::new(),
+            Box::new(LocalUpload {
+                inner_write: None,
+                file: Arc::new(file),
+            }),
+        ))
+    }
+
+    async fn cleanup_upload(&self, location: &Path, _upload_id: &UploadId) -> Result<()> {
+        // Clean up partial write
+        self.delete(location)
+            .map(|res| match res {
+                Err(super::Error::NotFound { path: _, source: _ }) => Ok(()),
+                res => res,
+            })
+            .await
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -457,13 +472,6 @@ impl ObjectStore for LocalFileSystem {
 struct LocalUpload {
     inner_write: Option<BoxFuture<'static, Result<usize, io::Error>>>,
     file: Arc<std::fs::File>,
-}
-
-#[async_trait]
-impl MultiPartUpload for LocalUpload {
-    async fn abort(&mut self) -> Result<()> {
-        Ok(())
-    }
 }
 
 impl AsyncWrite for LocalUpload {

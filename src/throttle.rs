@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::{convert::TryInto, sync::Arc};
 
-use crate::MultiPartUpload;
+use crate::UploadId;
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -138,13 +138,23 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         self.inner.put(location, bytes).await
     }
 
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
-        let inner = self.inner.upload(location).await?;
-        Ok(Box::new(ThrottledUpload {
-            inner,
-            config: Arc::clone(&self.config),
-            state: ThrottledUploadState::Idle,
-        }))
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+        let (upload_id, inner) = self.inner.upload(location).await?;
+        Ok((
+            upload_id,
+            Box::new(ThrottledUpload {
+                inner,
+                config: Arc::clone(&self.config),
+                state: ThrottledUploadState::Idle,
+            }),
+        ))
+    }
+
+    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()> {
+        self.inner.cleanup_upload(location, upload_id).await
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -256,7 +266,7 @@ enum ThrottledUploadState {
 }
 
 struct ThrottledUpload {
-    inner: Box<dyn MultiPartUpload>,
+    inner: Box<dyn AsyncWrite + Unpin + Send>,
     config: Arc<Mutex<ThrottleConfig>>,
     state: ThrottledUploadState,
 }
@@ -273,7 +283,7 @@ impl ThrottledUpload {
     ) -> Poll<Result<(), io::Error>>
     where
         F: Fn(
-            &mut Box<dyn MultiPartUpload>,
+            &mut Box<dyn AsyncWrite + Unpin + Send>,
             &mut std::task::Context<'_>,
         ) -> Poll<Result<(), io::Error>>,
     {
@@ -298,16 +308,6 @@ impl ThrottledUpload {
                 }
             }
         }
-    }
-}
-
-#[async_trait]
-impl MultiPartUpload for ThrottledUpload {
-    async fn abort(&mut self) -> Result<()> {
-        let wait = self.config().wait_put_per_call;
-        sleep(wait).await;
-        self.inner.abort().await?;
-        Ok(())
     }
 }
 

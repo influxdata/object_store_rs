@@ -57,6 +57,9 @@ use tokio::io::AsyncWrite;
 /// An alias for a dynamically dispatched object store implementation.
 pub type DynObjectStore = dyn ObjectStore;
 
+/// Id type for multi-part uploads.
+pub type UploadId = String;
+
 /// Universal API to multiple object store services.
 #[async_trait]
 pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
@@ -64,7 +67,13 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()>;
 
     /// Get a multi-part upload that allows writing data in chunks
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>>;
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)>;
+
+    /// Cleanup an aborted upload.
+    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()>;
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;
@@ -143,17 +152,6 @@ pub struct ObjectMeta {
     pub last_modified: DateTime<Utc>,
     /// The size in bytes of the object
     pub size: usize,
-}
-
-/// Multi-part upload
-#[async_trait]
-pub trait MultiPartUpload: AsyncWrite + Unpin + Send {
-    /// Abort the multipart upload
-    ///
-    /// On some services, if you fail to call this and do not
-    /// close the sink, parts will linger in the object store
-    /// and will be billed.
-    async fn abort(&mut self) -> Result<()>;
 }
 
 /// Result for a get request
@@ -499,11 +497,11 @@ mod tests {
         let location = Path::from("test_dir/test_upload_file.txt");
 
         // Can write to storage
-        let data = get_byte_stream(5_000, 10);
+        let data = get_byte_stream(5_000_000, 10);
         let bytes_expected = data.concat();
-        let mut writer = storage.upload(&location).await?;
-        for chunk in data {
-            writer.write_all(&chunk).await?;
+        let (_, mut writer) = storage.upload(&location).await?;
+        for chunk in &data {
+            writer.write_all(chunk).await?;
         }
         writer.shutdown().await?;
         let bytes_written = storage.get(&location).await?.bytes().await?;
@@ -512,15 +510,41 @@ mod tests {
         // Can overwrite some storage
         let data = get_byte_stream(5_000, 5);
         let bytes_expected = data.concat();
-        let mut writer = storage.upload(&location).await?;
-        for chunk in data {
-            writer.write_all(&chunk).await?;
+        let (_, mut writer) = storage.upload(&location).await?;
+        for chunk in &data {
+            writer.write_all(chunk).await?;
         }
         writer.shutdown().await?;
         let bytes_written = storage.get(&location).await?.bytes().await?;
         assert_eq!(bytes_expected, bytes_written);
 
-        // We can abort a write
+        // We can abort an empty write
+        let location = Path::from("test_dir/test_abort_upload.txt");
+        let (upload_id, writer) = storage.upload(&location).await?;
+        drop(writer);
+        storage.cleanup_upload(&location, &upload_id).await?;
+        let get_res = storage.get(&location).await;
+        assert!(get_res.is_err());
+        assert!(matches!(
+            get_res.unwrap_err(),
+            crate::Error::NotFound { .. }
+        ));
+
+        // We can abort an in-progress write
+        let (upload_id, mut writer) = storage.upload(&location).await?;
+        if let Some(chunk) = data.get(0) {
+            writer.write_all(chunk).await?;
+            let _ = writer.write(chunk).await?;
+        }
+        drop(writer);
+
+        storage.cleanup_upload(&location, &upload_id).await?;
+        let get_res = storage.get(&location).await;
+        assert!(get_res.is_err());
+        assert!(matches!(
+            get_res.unwrap_err(),
+            crate::Error::NotFound { .. }
+        ));
 
         Ok(())
     }

@@ -12,6 +12,7 @@ use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
 use reqwest::header::RANGE;
 use reqwest::{header, Client, Method, Response, StatusCode};
 use snafu::{ResultExt, Snafu};
+use tokio::io::AsyncWrite;
 
 use crate::util::format_http_range;
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
     path::{Path, DELIMITER},
     token::TokenCache,
     util::format_prefix,
-    GetResult, ListResult, MultiPartUpload, ObjectMeta, ObjectStore, Result,
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result, UploadId,
 };
 
 #[derive(Debug, Snafu)]
@@ -378,9 +379,16 @@ impl ObjectStore for GoogleCloudStorage {
         self.put_request(location, bytes).await
     }
 
-    async fn upload(&self, _location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+    async fn upload(
+        &self,
+        _location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
         // TODO: cloud_storage does not provide any bindings for multi-part upload.
         // But GCS does support this.
+        Err(super::Error::NotImplemented)
+    }
+
+    async fn cleanup_upload(&self, _location: &Path, _upload_id: &UploadId) -> Result<()> {
         Err(super::Error::NotImplemented)
     }
 

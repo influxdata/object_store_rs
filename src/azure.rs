@@ -3,7 +3,7 @@ use crate::{
     multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart},
     path::{Path, DELIMITER},
     util::format_prefix,
-    GetResult, ListResult, MultiPartUpload, ObjectMeta, ObjectStore, Result,
+    GetResult, ListResult, ObjectMeta, ObjectStore, Result, UploadId,
 };
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
@@ -24,6 +24,7 @@ use snafu::{ResultExt, Snafu};
 use std::collections::BTreeSet;
 use std::io;
 use std::{convert::TryInto, sync::Arc};
+use tokio::io::AsyncWrite;
 
 /// A specialized `Error` for Azure object store-related errors
 #[derive(Debug, Snafu)]
@@ -214,12 +215,21 @@ impl ObjectStore for MicrosoftAzure {
         Ok(())
     }
 
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
         let inner = AzureMultiPartUpload {
             container_client: Arc::clone(&self.container_client),
             location: location.to_owned(),
         };
-        Ok(Box::new(CloudMultiPartUpload::new(inner, 8)))
+        Ok((String::new(), Box::new(CloudMultiPartUpload::new(inner, 8))))
+    }
+
+    async fn cleanup_upload(&self, _location: &Path, _upload_id: &UploadId) -> Result<()> {
+        // There is no way to drop blocks that have been uploaded. Instead, they simply
+        // expire in 7 days.
+        Ok(())
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -630,13 +640,6 @@ impl CloudMultiPartUploadImpl for AzureMultiPartUpload {
 
             Ok(())
         })
-    }
-
-    fn abort(&self) -> BoxFuture<'static, Result<(), io::Error>> {
-        // There is no way to drop blocks that have been uploaded. Instead, they simply
-        // expire in 7 days.
-
-        Box::pin(async move { Ok(()) })
     }
 }
 

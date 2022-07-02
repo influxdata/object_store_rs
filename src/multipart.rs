@@ -1,11 +1,8 @@
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, Future, StreamExt};
 use std::{io, pin::Pin, sync::Arc, task::Poll};
-
-use async_trait::async_trait;
-use futures::{stream::FuturesUnordered, Future};
 use tokio::io::AsyncWrite;
 
-use crate::{MultiPartUpload, Result};
+use crate::Result;
 
 type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Send>>;
 
@@ -16,9 +13,6 @@ pub(crate) trait CloudMultiPartUploadImpl {
 
     /// Complete the upload with the provided parts
     fn complete(&self, completed_parts: Vec<Option<UploadPart>>) -> BoxedTryFuture<()>;
-
-    /// Cancel the upload in the cloud service
-    fn abort(&self) -> BoxedTryFuture<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -80,18 +74,6 @@ where
                 .resize(std::cmp::max(part_idx + 1, total_parts), None);
             self.completed_parts[part_idx] = Some(part);
         }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl<T> MultiPartUpload for CloudMultiPartUpload<T>
-where
-    T: CloudMultiPartUploadImpl + Send + Unpin + Sync,
-{
-    async fn abort(&mut self) -> Result<()> {
-        self.tasks.clear();
-        self.abort().await?;
         Ok(())
     }
 }

@@ -1,7 +1,7 @@
 //! An object store implementation for S3
 use crate::multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart};
 use crate::util::format_http_range;
-use crate::MultiPartUpload;
+use crate::UploadId;
 use crate::{
     collect_bytes,
     path::{Path, DELIMITER},
@@ -25,6 +25,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 use std::io;
 use std::ops::Range;
 use std::{convert::TryFrom, fmt, num::NonZeroUsize, ops::Deref, sync::Arc, time::Duration};
+use tokio::io::AsyncWrite;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, warn};
 
@@ -115,6 +116,19 @@ enum Error {
     ))]
     UnableToUploadData {
         source: rusoto_core::RusotoError<rusoto_s3::CreateMultipartUploadError>,
+        bucket: String,
+        path: String,
+    },
+
+    #[snafu(display(
+        "Unable to cleanup upload data. Bucket: {}, Location: {}, Error: {} ({:?})",
+        bucket,
+        path,
+        source,
+        source,
+    ))]
+    UnableToCleanupUploadData {
+        source: rusoto_core::RusotoError<rusoto_s3::AbortMultipartUploadError>,
         bucket: String,
         path: String,
     },
@@ -262,7 +276,10 @@ impl ObjectStore for AmazonS3 {
         Ok(())
     }
 
-    async fn upload(&self, location: &Path) -> Result<Box<dyn MultiPartUpload>> {
+    async fn upload(
+        &self,
+        location: &Path,
+    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
         // Submit new upload and save id
         let bucket_name = self.bucket_name.clone();
 
@@ -285,15 +302,40 @@ impl ObjectStore for AmazonS3 {
             path: location.as_ref(),
         })?;
 
+        let upload_id = data.upload_id.unwrap();
+
         let inner = S3MultiPartUpload {
-            upload_id: data.upload_id.unwrap(),
+            upload_id: upload_id.clone(),
             bucket: self.bucket_name.clone(),
             key: location.to_string(),
             client_unrestricted: self.client_unrestricted.clone(),
             connection_semaphore: Arc::clone(&self.connection_semaphore),
         };
 
-        Ok(Box::new(CloudMultiPartUpload::new(inner, 8)))
+        Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
+    }
+
+    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()> {
+        let request_factory = move || rusoto_s3::AbortMultipartUploadRequest {
+            bucket: self.bucket_name.clone(),
+            key: location.to_string(),
+            upload_id: upload_id.to_string(),
+            ..Default::default()
+        };
+
+        let s3 = self.client().await;
+        s3_request(move || {
+            let (s3, request_factory) = (s3.clone(), request_factory.clone());
+
+            async move { s3.abort_multipart_upload(request_factory()).await }
+        })
+        .await
+        .context(UnableToCleanupUploadDataSnafu {
+            bucket: &self.bucket_name,
+            path: location.as_ref(),
+        })?;
+
+        Ok(())
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -938,41 +980,6 @@ impl CloudMultiPartUploadImpl for S3MultiPartUpload {
                 let (s3, request_factory) = (s3.clone(), request_factory.clone());
 
                 async move { s3.complete_multipart_upload(request_factory()?).await }
-            })
-            .await
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-
-            Ok(())
-        })
-    }
-
-    fn abort(&self) -> BoxFuture<'static, Result<(), io::Error>> {
-        // Get values to move into future; we don't want a reference to Self
-        let bucket = self.bucket.clone();
-        let key = self.key.clone();
-        let upload_id = self.upload_id.clone();
-
-        let request_factory = move || rusoto_s3::AbortMultipartUploadRequest {
-            bucket,
-            key,
-            upload_id,
-            ..Default::default()
-        };
-
-        let s3 = self.client_unrestricted.clone();
-        let connection_semaphore = Arc::clone(&self.connection_semaphore);
-
-        Box::pin(async move {
-            #[allow(unused_variables)]
-            let permit = connection_semaphore
-                .acquire_owned()
-                .await
-                .expect("semaphore shouldn't be closed yet");
-
-            s3_request(move || {
-                let (s3, request_factory) = (s3.clone(), request_factory.clone());
-
-                async move { s3.abort_multipart_upload(request_factory()).await }
             })
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
