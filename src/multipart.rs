@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use pin_project::pin_project;
 use std::{io, pin::Pin, sync::Arc, task::Poll};
 
 use async_trait::async_trait;
@@ -27,7 +26,6 @@ pub(crate) struct UploadPart {
     pub content_id: String,
 }
 
-#[pin_project]
 pub(crate) struct CloudMultiPartUpload<T>
 where
     T: CloudMultiPartUploadImpl,
@@ -35,7 +33,6 @@ where
     inner: Arc<T>,
     /// A list of completed parts, in sequential order.
     completed_parts: Vec<Option<UploadPart>>,
-    #[pin]
     /// Part upload tasks currently running
     tasks: FuturesUnordered<BoxedTryFuture<(usize, UploadPart)>>,
     /// Maximum number of upload tasks to run concurrently
@@ -46,7 +43,6 @@ where
     min_part_size: usize,
     /// Index of current part
     current_part_idx: usize,
-    #[pin]
     /// The completion task
     completion_task: Option<BoxedTryFuture<()>>,
 }
@@ -62,7 +58,7 @@ where
             tasks: FuturesUnordered::new(),
             max_concurrency,
             current_buffer: Vec::new(),
-            // TODO: Should this vary by provider?
+            // TODO: Should self vary by provider?
             // TODO: Should we automatically increase then when part index gets large?
             min_part_size: 5_000_000,
             current_part_idx: 0,
@@ -71,20 +67,18 @@ where
     }
 
     pub fn poll_tasks(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> Result<(), io::Error> {
-        let mut this = self.project();
-        if this.tasks.is_empty() {
+        if self.tasks.is_empty() {
             return Ok(());
         }
-        while let Poll::Ready(Some(res)) = this.tasks.poll_next_unpin(cx) {
+        let total_parts = self.completed_parts.len();
+        while let Poll::Ready(Some(res)) = self.tasks.poll_next_unpin(cx) {
             let (part_idx, part) = res?;
-            this.completed_parts.resize(
-                std::cmp::max(part_idx + 1, this.completed_parts.len()),
-                None,
-            );
-            this.completed_parts[part_idx] = Some(part);
+            self.completed_parts
+                .resize(std::cmp::max(part_idx + 1, total_parts), None);
+            self.completed_parts[part_idx] = Some(part);
         }
         Ok(())
     }
@@ -114,26 +108,24 @@ where
         // Poll current tasks
         self.as_mut().poll_tasks(cx)?;
 
-        let this = self.as_mut().project();
-
         // If adding buf to pending buffer would trigger send, check
         // whether we have capacity for another task.
-        let enough_to_send = (buf.len() + this.current_buffer.len()) > *this.min_part_size;
-        if enough_to_send && this.tasks.len() < *this.max_concurrency {
+        let enough_to_send = (buf.len() + self.current_buffer.len()) > self.min_part_size;
+        if enough_to_send && self.tasks.len() < self.max_concurrency {
             // If we do, copy into the buffer and submit the task, and return ready.
-            this.current_buffer.extend_from_slice(buf);
+            self.current_buffer.extend_from_slice(buf);
 
-            let out_buffer = std::mem::take(this.current_buffer);
-            let task = this.inner.upload_part(out_buffer, *this.current_part_idx);
-            this.tasks.push(task);
-            *this.current_part_idx += 1;
+            let out_buffer = std::mem::take(&mut self.current_buffer);
+            let task = self.inner.upload_part(out_buffer, self.current_part_idx);
+            self.tasks.push(task);
+            self.current_part_idx += 1;
 
             // We need to poll immediately after adding to setup waker
             self.as_mut().poll_tasks(cx)?;
 
             Poll::Ready(Ok(buf.len()))
         } else if !enough_to_send {
-            this.current_buffer.extend_from_slice(buf);
+            self.current_buffer.extend_from_slice(buf);
             Poll::Ready(Ok(buf.len()))
         } else {
             // Waker registered by call to poll_tasks at beginning
@@ -148,13 +140,11 @@ where
         // Poll current tasks
         self.as_mut().poll_tasks(cx)?;
 
-        let this = self.as_mut().project();
-
         // If current_buffer is not empty, see if it can be submitted
-        if !this.current_buffer.is_empty() && this.tasks.len() < *this.max_concurrency {
-            let out_buffer: Vec<u8> = std::mem::take(this.current_buffer);
-            let task = this.inner.upload_part(out_buffer, *this.current_part_idx);
-            this.tasks.push(task);
+        if !self.current_buffer.is_empty() && self.tasks.len() < self.max_concurrency {
+            let out_buffer: Vec<u8> = std::mem::take(&mut self.current_buffer);
+            let task = self.inner.upload_part(out_buffer, self.current_part_idx);
+            self.tasks.push(task);
         }
 
         self.as_mut().poll_tasks(cx)?;
