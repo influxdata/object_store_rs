@@ -21,6 +21,8 @@
 //! * In-memory
 //! * Local file storage
 //!
+//! It also supports streaming writes (multi-part upload) for all except GCS.
+//! (GCS support coming soon!)
 
 #[cfg(feature = "aws")]
 pub mod aws;
@@ -67,6 +69,13 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()>;
 
     /// Get a multi-part upload that allows writing data in chunks
+    ///
+    /// To complete the upload, [AsyncWrite::poll_shutdown] must be called
+    /// to completion.
+    ///
+    /// For some object stores (S3, GCS, and local in particular), if the
+    /// writer fails or panics, you must call [ObjectStore::cleanup_upload]
+    /// to clean up partially written data.
     async fn upload(
         &self,
         location: &Path,
@@ -487,7 +496,7 @@ mod tests {
         Ok(())
     }
 
-    fn get_byte_stream(chunk_length: usize, num_chunks: usize) -> Vec<Bytes> {
+    fn get_vec_of_bytes(chunk_length: usize, num_chunks: usize) -> Vec<Bytes> {
         std::iter::repeat(Bytes::from_iter(std::iter::repeat(b'x').take(chunk_length)))
             .take(num_chunks)
             .collect()
@@ -497,7 +506,7 @@ mod tests {
         let location = Path::from("test_dir/test_upload_file.txt");
 
         // Can write to storage
-        let data = get_byte_stream(5_000_000, 10);
+        let data = get_vec_of_bytes(5_000_000, 10);
         let bytes_expected = data.concat();
         let (_, mut writer) = storage.upload(&location).await?;
         for chunk in &data {
@@ -508,7 +517,7 @@ mod tests {
         assert_eq!(bytes_expected, bytes_written);
 
         // Can overwrite some storage
-        let data = get_byte_stream(5_000, 5);
+        let data = get_vec_of_bytes(5_000_000, 5);
         let bytes_expected = data.concat();
         let (_, mut writer) = storage.upload(&location).await?;
         for chunk in &data {

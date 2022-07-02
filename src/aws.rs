@@ -1,4 +1,16 @@
 //! An object store implementation for S3
+//!
+//! ## Multi-part uploads
+//!
+//! Multi-part uploads can be initiated with the [ObjectStore::upload] method.
+//! Data passed to the writer is automatically buffered to meet the minimum size
+//! requirements for a part. Multiple parts are uploaded concurrently.
+//!
+//! If the writer fails for any reason, you may have parts uploaded to AWS but not
+//! used that you may be charged for. Use the [ObjectStore::cleanup_upload] method
+//! to abort the upload and drop those unneeded parts. In addition, you may wish to
+//! consider implementing automatic clean up of unused parts that are older than one
+//! week.
 use crate::multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart};
 use crate::util::format_http_range;
 use crate::UploadId;
@@ -280,7 +292,6 @@ impl ObjectStore for AmazonS3 {
         &self,
         location: &Path,
     ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
-        // Submit new upload and save id
         let bucket_name = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::CreateMultipartUploadRequest {
@@ -912,7 +923,6 @@ impl CloudMultiPartUploadImpl for S3MultiPartUpload {
 
             let response = s3_request(move || {
                 let (s3, request_factory) = (s3.clone(), request_factory.clone());
-
                 async move { s3.upload_part(request_factory()).await }
             })
             .await

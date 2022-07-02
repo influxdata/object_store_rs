@@ -1,4 +1,14 @@
 //! An object store implementation for Azure blob storage
+//!
+//! ## Streaming uploads
+//!
+//! [ObjectStore::upload] will upload data in blocks and write a blob from those
+//! blocks. Data is buffered internally to make blocks of at least 5MB and blocks
+//! are uploaded concurrently.
+//!
+//! [ObjectStore::cleanup_upload] is a no-op, since Azure Blob Store doesn't provide
+//! a way to drop old blocks. Instead unused blocks are automatically cleaned up
+//! after 7 days.
 use crate::{
     multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart},
     path::{Path, DELIMITER},
