@@ -336,7 +336,7 @@ impl ObjectStore for AmazonS3 {
 
         let s3 = self.client().await;
         s3_request(move || {
-            let (s3, request_factory) = (s3.clone(), request_factory.clone());
+            let (s3, request_factory) = (s3.clone(), request_factory);
 
             async move { s3.abort_multipart_upload(request_factory()).await }
         })
