@@ -7,7 +7,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Future;
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use futures::{stream::BoxStream, StreamExt};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::collections::VecDeque;
@@ -19,7 +20,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::{collections::BTreeSet, convert::TryFrom, io};
 use tokio::io::AsyncWrite;
-use tokio::task::JoinHandle;
 use url::Url;
 use walkdir::{DirEntry, WalkDir};
 
@@ -238,7 +238,7 @@ impl ObjectStore for LocalFileSystem {
         let file = open_writable_file(&path)?;
 
         Ok(Box::new(LocalUpload {
-            state: LocalUploadState::Idle,
+            inner_write: None,
             file: Arc::new(file),
         }))
     }
@@ -454,17 +454,8 @@ impl ObjectStore for LocalFileSystem {
     }
 }
 
-enum LocalUploadOperation {
-    Write,
-}
-
-enum LocalUploadState {
-    Idle,
-    Busy(JoinHandle<Result<LocalUploadOperation, io::Error>>),
-}
-
 struct LocalUpload {
-    state: LocalUploadState,
+    inner_write: Option<BoxFuture<'static, Result<usize, io::Error>>>,
     file: Arc<std::fs::File>,
 }
 
@@ -481,40 +472,33 @@ impl AsyncWrite for LocalUpload {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        loop {
-            match &mut self.state {
-                LocalUploadState::Idle => {
-                    let file = Arc::clone(&self.file);
-                    match tokio::runtime::Handle::try_current() {
-                        Ok(runtime) => {
-                            let data: Vec<u8> = buf.to_vec();
-                            self.state =
-                                LocalUploadState::Busy(runtime.spawn_blocking(move || {
-                                    (&*file).write_all(&data)?;
-                                    Ok(LocalUploadOperation::Write)
-                                }));
-                        }
-                        Err(_) => {
-                            (&*file).write_all(buf)?;
-                            return Poll::Ready(Ok(buf.len()));
-                        }
-                    }
+        let file = Arc::clone(&self.file);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let data: Vec<u8> = buf.to_vec();
+            let data_len = data.len();
+            let inner_write = self.inner_write.get_or_insert_with(move || {
+                Box::pin(
+                    runtime
+                        .spawn_blocking(move || (&*file).write_all(&data))
+                        .map(move |res| match res {
+                            Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
+                            Ok(res) => res.map(move |_| data_len),
+                        }),
+                )
+            });
+            match inner_write.poll_unpin(cx) {
+                Poll::Ready(res) => {
+                    self.inner_write = None;
+                    Poll::Ready(res)
                 }
-                LocalUploadState::Busy(handle) => {
-                    let op = match Pin::new(handle).poll(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(res) => res??,
-                    };
-                    match op {
-                        LocalUploadOperation::Write => {
-                            self.state = LocalUploadState::Idle;
-                            return Poll::Ready(Ok(buf.len()));
-                        }
-                    }
-                }
+                Poll::Pending => Poll::Pending,
             }
+        } else {
+            (&*file).write_all(buf)?;
+            Poll::Ready(Ok(buf.len()))
         }
     }
+
     fn poll_flush(
         self: Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
