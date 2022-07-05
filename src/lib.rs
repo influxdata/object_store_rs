@@ -33,6 +33,12 @@ pub mod memory;
 pub mod path;
 pub mod throttle;
 
+#[cfg(feature = "gcp")]
+mod oauth;
+
+#[cfg(feature = "gcp")]
+mod token;
+
 mod util;
 
 use crate::path::Path;
@@ -271,6 +277,10 @@ pub enum Error {
 
     #[snafu(display("Operation not yet implemented."))]
     NotImplemented,
+
+    #[cfg(feature = "gcp")]
+    #[snafu(display("OAuth error: {}", source), context(false))]
+    OAuth { source: oauth::Error },
 }
 
 #[cfg(test)]
@@ -359,14 +369,7 @@ mod tests {
         let out_of_range = 200..300;
         let out_of_range_result = storage.get_range(&location, out_of_range).await;
 
-        if store_str.starts_with("GoogleCloudStorage") {
-            // cloud_storage_rs doesn't report range requests (yet)
-            let err = range_result.unwrap_err();
-            assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
-
-            let err = out_of_range_result.unwrap_err();
-            assert!(matches!(err, super::Error::NotSupported { .. }), "{}", err);
-        } else if store_str.starts_with("MicrosoftAzureEmulator") {
+        if store_str.starts_with("MicrosoftAzureEmulator") {
             // Azurite doesn't support x-ms-range-get-content-crc64 set by Azure SDK
             // https://github.com/Azure/Azurite/issues/444
             let err = range_result.unwrap_err().to_string();
@@ -572,13 +575,13 @@ mod tests {
     pub(crate) async fn get_nonexistent_object(
         storage: &DynObjectStore,
         location: Option<Path>,
-    ) -> Result<Bytes> {
+    ) -> crate::Result<Bytes> {
         let location = location.unwrap_or_else(|| Path::from("this_file_should_not_exist"));
 
         let err = storage.head(&location).await.unwrap_err();
         assert!(matches!(err, crate::Error::NotFound { .. }));
 
-        Ok(storage.get(&location).await?.bytes().await?)
+        storage.get(&location).await?.bytes().await
     }
 
     pub(crate) async fn rename_and_copy(storage: &DynObjectStore) -> Result<()> {

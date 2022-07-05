@@ -1,129 +1,125 @@
 //! An object store implementation for Google Cloud Storage
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::BufReader;
+use std::ops::Range;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
+use reqwest::header::RANGE;
+use reqwest::{header, Client, Method, Response, StatusCode};
+use snafu::{ResultExt, Snafu};
+
+use crate::util::format_http_range;
 use crate::{
+    oauth::OAuthProvider,
     path::{Path, DELIMITER},
+    token::TokenCache,
     util::format_prefix,
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
-use async_trait::async_trait;
-use bytes::Bytes;
-use cloud_storage::{Client, Object};
-use futures::{stream::BoxStream, StreamExt, TryStreamExt};
-use snafu::{ResultExt, Snafu};
-use std::ops::Range;
-use std::{convert::TryFrom, env};
 
-/// A specialized `Error` for Google Cloud Storage object store-related errors
+const BASE_URL: &str = "https://storage.googleapis.com/storage/v1";
+
 #[derive(Debug, Snafu)]
-#[allow(missing_docs)]
 enum Error {
-    #[snafu(display("Expected streamed data to have length {}, got {}", expected, actual))]
-    DataDoesNotMatchLength { expected: usize, actual: usize },
+    #[snafu(display("Unable to open service account file: {}", source))]
+    OpenCredentials { source: std::io::Error },
 
-    #[snafu(display(
-        "Unable to PUT data. Bucket: {}, Location: {}, Error: {}",
-        bucket,
-        path,
-        source
-    ))]
-    UnableToPutData {
-        source: cloud_storage::Error,
-        bucket: String,
+    #[snafu(display("Unable to decode service account file: {}", source))]
+    DecodeCredentials { source: serde_json::Error },
+
+    #[snafu(display("Error performing list request: {}", source))]
+    ListRequest { source: reqwest::Error },
+
+    #[snafu(display("Error performing get request {}: {}", path, source))]
+    GetRequest {
+        source: reqwest::Error,
         path: String,
     },
 
-    #[snafu(display("Unable to list data. Bucket: {}, Error: {}", bucket, source,))]
-    UnableToListData {
-        source: cloud_storage::Error,
-        bucket: String,
-    },
-
-    #[snafu(display("Unable to stream list data. Bucket: {}, Error: {}", bucket, source,))]
-    UnableToStreamListData {
-        source: cloud_storage::Error,
-        bucket: String,
-    },
-
-    #[snafu(display(
-        "Unable to DELETE data. Bucket: {}, Location: {}, Error: {}",
-        bucket,
-        path,
-        source,
-    ))]
-    UnableToDeleteData {
-        source: cloud_storage::Error,
-        bucket: String,
+    #[snafu(display("Error performing delete request {}: {}", path, source))]
+    DeleteRequest {
+        source: reqwest::Error,
         path: String,
     },
 
-    #[snafu(display(
-        "Unable to GET data. Bucket: {}, Location: {}, Error: {}",
-        bucket,
-        path,
-        source,
-    ))]
-    UnableToGetData {
-        source: cloud_storage::Error,
-        bucket: String,
+    #[snafu(display("Error performing copy request {}: {}", path, source))]
+    CopyRequest {
+        source: reqwest::Error,
         path: String,
     },
 
-    #[snafu(display(
-        "Unable to GET data. Bucket: {}, Location: {}, Error: {}",
-        bucket,
-        path,
-        source,
-    ))]
-    UnableToHeadData {
-        source: cloud_storage::Error,
-        bucket: String,
-        path: String,
-    },
+    #[snafu(display("Error performing put request: {}", source))]
+    PutRequest { source: reqwest::Error },
 
-    #[snafu(display(
-        "Unable to copy object. Bucket: {}, From: {}, To: {}, Error: {}",
-        bucket,
-        from,
-        to,
-        source,
-    ))]
-    UnableToCopyObject {
-        source: cloud_storage::Error,
-        bucket: String,
-        from: String,
-        to: String,
-    },
-
-    NotFound {
-        path: String,
-        source: cloud_storage::Error,
-    },
-
-    AlreadyExists {
-        path: String,
-        source: cloud_storage::Error,
-    },
+    #[snafu(display("Error decoding object size: {}", source))]
+    InvalidSize { source: std::num::ParseIntError },
 }
 
 impl From<Error> for super::Error {
-    fn from(source: Error) -> Self {
-        match source {
-            Error::NotFound { path, source } => Self::NotFound {
-                path,
-                source: source.into(),
-            },
+    fn from(err: Error) -> Self {
+        match err {
+            Error::GetRequest { source, path }
+            | Error::DeleteRequest { source, path }
+            | Error::CopyRequest { source, path }
+                if matches!(source.status(), Some(StatusCode::NOT_FOUND)) =>
+            {
+                Self::NotFound {
+                    path,
+                    source: Box::new(source),
+                }
+            }
             _ => Self::Generic {
                 store: "GCS",
-                source: Box::new(source),
+                source: Box::new(err),
             },
         }
     }
+}
+
+/// A deserialized `service-account-********.json`-file.
+#[derive(serde::Deserialize, Debug)]
+struct ServiceAccountCredentials {
+    /// The private key in RSA format.
+    pub private_key: String,
+    /// The email address associated with the service account.
+    pub client_email: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ListResponse {
+    next_page_token: Option<String>,
+    #[serde(default)]
+    prefixes: Vec<String>,
+    #[serde(default)]
+    items: Vec<Object>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct Object {
+    name: String,
+    size: String,
+    updated: DateTime<Utc>,
 }
 
 /// Configuration for connecting to [Google Cloud Storage](https://cloud.google.com/storage/).
 #[derive(Debug)]
 pub struct GoogleCloudStorage {
     client: Client,
+
+    oauth_provider: OAuthProvider,
+    token_cache: TokenCache<String>,
+
     bucket_name: String,
+    bucket_name_encoded: String,
+
+    // TODO: Hook this up in tests
+    max_list_results: Option<String>,
 }
 
 impl std::fmt::Display for GoogleCloudStorage {
@@ -132,225 +128,353 @@ impl std::fmt::Display for GoogleCloudStorage {
     }
 }
 
-#[async_trait]
-impl ObjectStore for GoogleCloudStorage {
-    async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        let bucket_name = self.bucket_name.clone();
+impl GoogleCloudStorage {
+    async fn get_token(&self) -> Result<String> {
+        Ok(self
+            .token_cache
+            .get_or_insert_with(|| self.oauth_provider.fetch_token(&self.client))
+            .await?)
+    }
+
+    fn object_url(&self, path: &Path) -> String {
+        let encoded = percent_encoding::utf8_percent_encode(path.as_ref(), NON_ALPHANUMERIC);
+        format!("{}/b/{}/o/{}", BASE_URL, self.bucket_name_encoded, encoded)
+    }
+
+    /// Perform a get request <https://cloud.google.com/storage/docs/json_api/v1/objects/get>
+    async fn get_request(
+        &self,
+        path: &Path,
+        range: Option<Range<usize>>,
+        head: bool,
+    ) -> Result<Response> {
+        let token = self.get_token().await?;
+        let url = self.object_url(path);
+
+        let mut builder = self.client.request(Method::GET, url);
+
+        if let Some(range) = range {
+            builder = builder.header(RANGE, format_http_range(range));
+        }
+
+        let alt = match head {
+            true => "json",
+            false => "media",
+        };
+
+        let response = builder
+            .bearer_auth(token)
+            .query(&[("alt", alt)])
+            .send()
+            .await
+            .context(GetRequestSnafu {
+                path: path.as_ref(),
+            })?
+            .error_for_status()
+            .context(GetRequestSnafu {
+                path: path.as_ref(),
+            })?;
+
+        Ok(response)
+    }
+
+    /// Perform a put request <https://cloud.google.com/storage/docs/json_api/v1/objects/insert>
+    async fn put_request(&self, path: &Path, payload: Bytes) -> Result<()> {
+        let token = self.get_token().await?;
+        let url = format!(
+            "https://storage.googleapis.com/upload/storage/v1/b/{}/o",
+            self.bucket_name_encoded
+        );
 
         self.client
-            .object()
-            .create(
-                &bucket_name,
-                bytes.to_vec(),
-                location.as_ref(),
-                "application/octet-stream",
-            )
+            .request(Method::POST, url)
+            .bearer_auth(token)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, payload.len())
+            .query(&[("uploadType", "media"), ("name", path.as_ref())])
+            .body(payload)
+            .send()
             .await
-            .context(UnableToPutDataSnafu {
-                bucket: &self.bucket_name,
-                path: location.to_string(),
+            .context(PutRequestSnafu)?
+            .error_for_status()
+            .context(PutRequestSnafu)?;
+
+        Ok(())
+    }
+
+    /// Perform a delete request <https://cloud.google.com/storage/docs/json_api/v1/objects/delete>
+    async fn delete_request(&self, path: &Path) -> Result<()> {
+        let token = self.get_token().await?;
+        let url = self.object_url(path);
+
+        let builder = self.client.request(Method::DELETE, url);
+        builder
+            .bearer_auth(token)
+            .send()
+            .await
+            .context(DeleteRequestSnafu {
+                path: path.as_ref(),
+            })?
+            .error_for_status()
+            .context(DeleteRequestSnafu {
+                path: path.as_ref(),
             })?;
 
         Ok(())
     }
 
-    async fn get(&self, location: &Path) -> Result<GetResult> {
-        let bucket_name = self.bucket_name.clone();
+    /// Perform a copy request <https://cloud.google.com/storage/docs/json_api/v1/objects/copy>
+    async fn copy_request(&self, from: &Path, to: &Path, if_not_exists: bool) -> Result<()> {
+        let token = self.get_token().await?;
 
-        let bytes = self
-            .client
-            .object()
-            .download(&bucket_name, location.as_ref())
+        let source = percent_encoding::utf8_percent_encode(from.as_ref(), NON_ALPHANUMERIC);
+        let destination = percent_encoding::utf8_percent_encode(to.as_ref(), NON_ALPHANUMERIC);
+        let url = format!(
+            "{}/b/{}/o/{}/copyTo/b/{}/o/{}",
+            BASE_URL, self.bucket_name_encoded, source, self.bucket_name_encoded, destination
+        );
+
+        let mut builder = self.client.request(Method::POST, url);
+
+        if if_not_exists {
+            builder = builder.query(&[("ifGenerationMatch", "0")]);
+        }
+
+        builder
+            .bearer_auth(token)
+            .send()
             .await
-            .map_err(|e| match e {
-                cloud_storage::Error::Other(ref text) if text.starts_with("No such object") => {
-                    Error::NotFound {
-                        path: location.to_string(),
-                        source: e,
-                    }
-                }
-                _ => Error::UnableToGetData {
-                    bucket: bucket_name.clone(),
-                    path: location.to_string(),
-                    source: e,
-                },
+            .context(CopyRequestSnafu {
+                path: from.as_ref(),
+            })?
+            .error_for_status()
+            .context(CopyRequestSnafu {
+                path: from.as_ref(),
             })?;
 
-        let s = futures::stream::once(async move { Ok(bytes.into()) }).boxed();
-        Ok(GetResult::Stream(s))
+        Ok(())
     }
 
-    async fn get_range(&self, _location: &Path, _range: Range<usize>) -> Result<Bytes> {
-        Err(super::Error::NotSupported { source: "cloud_storage_rs does not support range requests - https://github.com/ThouCheese/cloud-storage-rs/pull/111".into() })
+    /// Perform a list request <https://cloud.google.com/storage/docs/json_api/v1/objects/list>
+    async fn list_request(
+        &self,
+        prefix: Option<&str>,
+        delimiter: bool,
+        page_token: Option<&str>,
+    ) -> Result<ListResponse> {
+        let token = self.get_token().await?;
+
+        let url = format!("{}/b/{}/o", BASE_URL, self.bucket_name_encoded);
+
+        let mut query = Vec::with_capacity(4);
+        if delimiter {
+            query.push(("delimiter", DELIMITER))
+        }
+
+        if let Some(prefix) = &prefix {
+            query.push(("prefix", prefix))
+        }
+
+        if let Some(page_token) = page_token {
+            query.push(("pageToken", page_token))
+        }
+
+        if let Some(max_results) = &self.max_list_results {
+            query.push(("maxResults", max_results))
+        }
+
+        let response: ListResponse = self
+            .client
+            .request(Method::GET, url)
+            .query(&query)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context(ListRequestSnafu)?
+            .error_for_status()
+            .context(ListRequestSnafu)?
+            .json()
+            .await
+            .context(ListRequestSnafu)?;
+
+        Ok(response)
+    }
+
+    /// Perform a list operation automatically handling pagination
+    fn list_paginated(
+        &self,
+        prefix: Option<&Path>,
+        delimiter: bool,
+    ) -> Result<BoxStream<'_, Result<ListResponse>>> {
+        let prefix = format_prefix(prefix);
+
+        enum ListState {
+            Start,
+            HasMore(String),
+            Done,
+        }
+
+        Ok(futures::stream::unfold(ListState::Start, move |state| {
+            let prefix = prefix.clone();
+
+            async move {
+                let page_token = match &state {
+                    ListState::Start => None,
+                    ListState::HasMore(page_token) => Some(page_token.as_str()),
+                    ListState::Done => {
+                        return None;
+                    }
+                };
+
+                let resp = match self
+                    .list_request(prefix.as_deref(), delimiter, page_token)
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => return Some((Err(e), state)),
+                };
+
+                let next_state = match &resp.next_page_token {
+                    Some(token) => ListState::HasMore(token.clone()),
+                    None => ListState::Done,
+                };
+
+                Some((Ok(resp), next_state))
+            }
+        })
+        .boxed())
+    }
+}
+
+#[async_trait]
+impl ObjectStore for GoogleCloudStorage {
+    async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
+        self.put_request(location, bytes).await
+    }
+
+    async fn get(&self, location: &Path) -> Result<GetResult> {
+        let response = self.get_request(location, None, false).await?;
+        let stream = response
+            .bytes_stream()
+            .map_err(|source| crate::Error::Generic {
+                store: "GCS",
+                source: Box::new(source),
+            })
+            .boxed();
+
+        Ok(GetResult::Stream(stream))
+    }
+
+    async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
+        let response = self.get_request(location, Some(range), false).await?;
+        Ok(response.bytes().await.context(GetRequestSnafu {
+            path: location.as_ref(),
+        })?)
     }
 
     async fn head(&self, location: &Path) -> Result<ObjectMeta> {
-        let object = self
-            .client
-            .object()
-            .read(&self.bucket_name, location.as_ref())
-            .await
-            .map_err(|e| match e {
-                cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
-                    Error::NotFound {
-                        path: location.to_string(),
-                        source: e,
-                    }
-                }
-                _ => Error::UnableToHeadData {
-                    bucket: self.bucket_name.clone(),
-                    path: location.to_string(),
-                    source: e,
-                },
-            })?;
-
+        let response = self.get_request(location, None, true).await?;
+        let object = response.json().await.context(GetRequestSnafu {
+            path: location.as_ref(),
+        })?;
         convert_object_meta(&object)
     }
 
     async fn delete(&self, location: &Path) -> Result<()> {
-        let bucket_name = self.bucket_name.clone();
-
-        self.client
-            .object()
-            .delete(&bucket_name, location.as_ref())
-            .await
-            .context(UnableToDeleteDataSnafu {
-                bucket: &self.bucket_name,
-                path: location.to_string(),
-            })?;
-
-        Ok(())
+        self.delete_request(location).await
     }
 
     async fn list(&self, prefix: Option<&Path>) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        let list_request = cloud_storage::ListRequest {
-            prefix: format_prefix(prefix),
-            ..Default::default()
-        };
+        let stream = self
+            .list_paginated(prefix, false)?
+            .map_ok(|r| futures::stream::iter(r.items.into_iter().map(|x| convert_object_meta(&x))))
+            .try_flatten()
+            .boxed();
 
-        // Note: cloud_storage automatically handles pagination
-        let object_lists = self
-            .client
-            .object()
-            .list(&self.bucket_name, list_request)
-            .await
-            .context(UnableToListDataSnafu {
-                bucket: &self.bucket_name,
-            })?;
-
-        let bucket_name = self.bucket_name.clone();
-        let objects = object_lists
-            .map_ok(move |list| {
-                futures::stream::iter(list.items.into_iter().map(|o| convert_object_meta(&o)))
-            })
-            .map_err(move |source| {
-                crate::Error::from(Error::UnableToStreamListData {
-                    source,
-                    bucket: bucket_name.clone(),
-                })
-            });
-
-        Ok(objects.try_flatten().boxed())
+        Ok(stream)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
-        let list_request = cloud_storage::ListRequest {
-            prefix: format_prefix(prefix),
-            delimiter: Some(DELIMITER.to_string()),
-            ..Default::default()
-        };
+        let mut stream = self.list_paginated(prefix, true)?;
 
-        // Note: cloud_storage automatically handles pagination
-        let mut object_lists = Box::pin(
-            self.client
-                .object()
-                .list(&self.bucket_name, list_request)
-                .await
-                .context(UnableToListDataSnafu {
-                    bucket: &self.bucket_name,
-                })?,
-        );
+        let mut common_prefixes = BTreeSet::new();
+        let mut objects = Vec::new();
 
-        let result = match object_lists.next().await {
-            None => ListResult {
-                objects: vec![],
-                common_prefixes: vec![],
-            },
-            Some(list_response) => {
-                let list_response = list_response.context(UnableToStreamListDataSnafu {
-                    bucket: &self.bucket_name,
-                })?;
+        while let Some(result) = stream.next().await {
+            let response = result?;
 
-                let objects = list_response
-                    .items
-                    .iter()
-                    .map(convert_object_meta)
-                    .collect::<Result<_>>()?;
-
-                let common_prefixes = list_response
-                    .prefixes
-                    .iter()
-                    .map(Path::parse)
-                    .collect::<Result<_, _>>()?;
-
-                ListResult {
-                    objects,
-                    common_prefixes,
-                }
+            for p in response.prefixes {
+                common_prefixes.insert(Path::parse(p)?);
             }
-        };
 
-        Ok(result)
+            objects.reserve(response.items.len());
+            for object in &response.items {
+                objects.push(convert_object_meta(object)?);
+            }
+        }
+
+        Ok(ListResult {
+            common_prefixes: common_prefixes.into_iter().collect(),
+            objects,
+        })
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> Result<()> {
-        let from = from.as_ref();
-        let to = to.as_ref();
-        let bucket_name = self.bucket_name.clone();
-
-        let source_obj = self
-            .client
-            .object()
-            .read(&bucket_name, from)
-            .await
-            .map_err(|e| match e {
-                cloud_storage::Error::Google(ref error) if error.error.code == 404 => {
-                    Error::NotFound {
-                        path: from.to_string(),
-                        source: e,
-                    }
-                }
-                _ => Error::UnableToCopyObject {
-                    bucket: self.bucket_name.clone(),
-                    from: from.to_string(),
-                    to: to.to_string(),
-                    source: e,
-                },
-            })?;
-
-        self.client
-            .object()
-            .copy(&source_obj, &bucket_name, to)
-            .await
-            .context(UnableToCopyObjectSnafu {
-                bucket: self.bucket_name.clone(),
-                from: from.to_string(),
-                to: to.to_string(),
-            })?;
-
-        Ok(())
+        self.copy_request(from, to, false).await
     }
 
-    async fn copy_if_not_exists(&self, _source: &Path, _dest: &Path) -> Result<()> {
-        // cloud-storage crate doesn't yet support rewrite_object with precondition
-        Err(crate::Error::NotImplemented)
+    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> Result<()> {
+        self.copy_request(from, to, true).await
     }
+}
+
+fn reader_credentials_file(
+    service_account_path: impl AsRef<std::path::Path>,
+) -> Result<ServiceAccountCredentials> {
+    let file = File::open(service_account_path).context(OpenCredentialsSnafu)?;
+    let reader = BufReader::new(file);
+    Ok(serde_json::from_reader(reader).context(DecodeCredentialsSnafu)?)
+}
+
+/// Configure a connection to Google Cloud Storage.
+pub fn new_gcs(
+    service_account_path: impl AsRef<std::path::Path>,
+    bucket_name: impl Into<String>,
+) -> Result<GoogleCloudStorage> {
+    let credentials = reader_credentials_file(service_account_path)?;
+    let client = Client::new();
+
+    // TODO: https://cloud.google.com/storage/docs/authentication#oauth-scopes
+    let scope = "https://www.googleapis.com/auth/devstorage.full_control";
+    let audience = "https://www.googleapis.com/oauth2/v4/token".to_string();
+
+    let oauth_provider = OAuthProvider::new(
+        credentials.client_email,
+        credentials.private_key,
+        scope.to_string(),
+        audience,
+    )?;
+
+    let bucket_name = bucket_name.into();
+    let encoded_bucket_name = percent_encode(bucket_name.as_bytes(), NON_ALPHANUMERIC).to_string();
+
+    // The cloud storage crate currently only supports authentication via
+    // environment variables. Set the environment variable explicitly so
+    // that we can optionally accept command line arguments instead.
+    Ok(GoogleCloudStorage {
+        client,
+        oauth_provider,
+        token_cache: Default::default(),
+        bucket_name,
+        bucket_name_encoded: encoded_bucket_name,
+        max_list_results: None,
+    })
 }
 
 fn convert_object_meta(object: &Object) -> Result<ObjectMeta> {
     let location = Path::parse(&object.name)?;
     let last_modified = object.updated;
-    let size = usize::try_from(object.size).expect("unsupported size on this platform");
+    let size = object.size.parse().context(InvalidSizeSnafu)?;
 
     Ok(ObjectMeta {
         location,
@@ -359,24 +483,12 @@ fn convert_object_meta(object: &Object) -> Result<ObjectMeta> {
     })
 }
 
-/// Configure a connection to Google Cloud Storage.
-pub fn new_gcs(
-    service_account_path: impl AsRef<std::ffi::OsStr>,
-    bucket_name: impl Into<String>,
-) -> Result<GoogleCloudStorage> {
-    // The cloud storage crate currently only supports authentication via
-    // environment variables. Set the environment variable explicitly so
-    // that we can optionally accept command line arguments instead.
-    env::set_var("SERVICE_ACCOUNT", service_account_path);
-    Ok(GoogleCloudStorage {
-        client: Default::default(),
-        bucket_name: bucket_name.into(),
-    })
-}
-
 #[cfg(test)]
 mod test {
-    use super::*;
+    use std::env;
+
+    use bytes::Bytes;
+
     use crate::{
         tests::{
             get_nonexistent_object, list_uses_directories_correctly, list_with_delimiter,
@@ -384,8 +496,8 @@ mod test {
         },
         Error as ObjectStoreError, ObjectStore,
     };
-    use bytes::Bytes;
-    use std::env;
+
+    use super::*;
 
     const NON_EXISTENT_NAME: &str = "nonexistentname";
 
@@ -459,17 +571,11 @@ mod test {
 
         let err = integration.get(&location).await.unwrap_err();
 
-        if let ObjectStoreError::NotFound { path, source } = err {
-            let source_variant = source.downcast_ref::<cloud_storage::Error>();
-            assert!(
-                matches!(source_variant, Some(cloud_storage::Error::Other(_))),
-                "got: {:?}",
-                source_variant
-            );
-            assert_eq!(path, NON_EXISTENT_NAME);
-        } else {
-            panic!("unexpected error type: {:?}", err)
-        }
+        assert!(
+            matches!(err, ObjectStoreError::NotFound { .. }),
+            "unexpected error type: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -482,10 +588,13 @@ mod test {
 
         let err = get_nonexistent_object(&integration, Some(location))
             .await
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
 
-        assert!(err.contains("Unable to GET data"), "{}", err)
+        assert!(
+            matches!(err, ObjectStoreError::NotFound { .. }),
+            "unexpected error type: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -495,8 +604,12 @@ mod test {
 
         let location = Path::from_iter([NON_EXISTENT_NAME]);
 
-        let err = integration.delete(&location).await.unwrap_err().to_string();
-        assert!(err.contains("Unable to DELETE data"), "{}", err)
+        let err = integration.delete(&location).await.unwrap_err();
+        assert!(
+            matches!(err, ObjectStoreError::NotFound { .. }),
+            "unexpected error type: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -507,8 +620,12 @@ mod test {
 
         let location = Path::from_iter([NON_EXISTENT_NAME]);
 
-        let err = integration.delete(&location).await.unwrap_err().to_string();
-        assert!(err.contains("Unable to DELETE data"), "{}", err)
+        let err = integration.delete(&location).await.unwrap_err();
+        assert!(
+            matches!(err, ObjectStoreError::NotFound { .. }),
+            "unexpected error type: {}",
+            err
+        );
     }
 
     #[tokio::test]
@@ -525,6 +642,10 @@ mod test {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Unable to PUT data"), "{}", err)
+        assert!(
+            err.contains("Error performing put request: HTTP status client error (404 Not Found)"),
+            "{}",
+            err
+        )
     }
 }

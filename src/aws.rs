@@ -909,9 +909,7 @@ mod tests {
         let err = get_nonexistent_object(&integration, Some(location))
             .await
             .unwrap_err();
-        if let Some(ObjectStoreError::NotFound { path, source }) =
-            err.downcast_ref::<ObjectStoreError>()
-        {
+        if let ObjectStoreError::NotFound { path, source } = err {
             let source_variant = source.downcast_ref::<rusoto_core::RusotoError<_>>();
             assert!(
                 matches!(
