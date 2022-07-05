@@ -22,8 +22,6 @@ use crate::{
     GetResult, ListResult, ObjectMeta, ObjectStore, Result,
 };
 
-const BASE_URL: &str = "https://storage.googleapis.com/storage/v1";
-
 #[derive(Debug, Snafu)]
 enum Error {
     #[snafu(display("Unable to open service account file: {}", source))]
@@ -86,8 +84,25 @@ impl From<Error> for super::Error {
 struct ServiceAccountCredentials {
     /// The private key in RSA format.
     pub private_key: String,
+
     /// The email address associated with the service account.
     pub client_email: String,
+
+    /// Base URL for GCS
+    #[serde(default = "default_gcs_base_url")]
+    pub gcs_base_url: String,
+
+    /// Disable oauth and use empty tokens.
+    #[serde(default = "default_disable_oauth")]
+    pub disable_oauth: bool,
+}
+
+fn default_gcs_base_url() -> String {
+    "https://storage.googleapis.com/storage/v1".to_owned()
+}
+
+fn default_disable_oauth() -> bool {
+    false
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -111,8 +126,9 @@ struct Object {
 #[derive(Debug)]
 pub struct GoogleCloudStorage {
     client: Client,
+    base_url: String,
 
-    oauth_provider: OAuthProvider,
+    oauth_provider: Option<OAuthProvider>,
     token_cache: TokenCache<String>,
 
     bucket_name: String,
@@ -130,15 +146,22 @@ impl std::fmt::Display for GoogleCloudStorage {
 
 impl GoogleCloudStorage {
     async fn get_token(&self) -> Result<String> {
-        Ok(self
-            .token_cache
-            .get_or_insert_with(|| self.oauth_provider.fetch_token(&self.client))
-            .await?)
+        if let Some(oauth_provider) = &self.oauth_provider {
+            Ok(self
+                .token_cache
+                .get_or_insert_with(|| oauth_provider.fetch_token(&self.client))
+                .await?)
+        } else {
+            Ok("".to_owned())
+        }
     }
 
     fn object_url(&self, path: &Path) -> String {
         let encoded = percent_encoding::utf8_percent_encode(path.as_ref(), NON_ALPHANUMERIC);
-        format!("{}/b/{}/o/{}", BASE_URL, self.bucket_name_encoded, encoded)
+        format!(
+            "{}/storage/v1/b/{}/o/{}",
+            self.base_url, self.bucket_name_encoded, encoded
+        )
     }
 
     /// Perform a get request <https://cloud.google.com/storage/docs/json_api/v1/objects/get>
@@ -182,8 +205,8 @@ impl GoogleCloudStorage {
     async fn put_request(&self, path: &Path, payload: Bytes) -> Result<()> {
         let token = self.get_token().await?;
         let url = format!(
-            "https://storage.googleapis.com/upload/storage/v1/b/{}/o",
-            self.bucket_name_encoded
+            "{}/upload/storage/v1/b/{}/o",
+            self.base_url, self.bucket_name_encoded
         );
 
         self.client
@@ -230,8 +253,8 @@ impl GoogleCloudStorage {
         let source = percent_encoding::utf8_percent_encode(from.as_ref(), NON_ALPHANUMERIC);
         let destination = percent_encoding::utf8_percent_encode(to.as_ref(), NON_ALPHANUMERIC);
         let url = format!(
-            "{}/b/{}/o/{}/copyTo/b/{}/o/{}",
-            BASE_URL, self.bucket_name_encoded, source, self.bucket_name_encoded, destination
+            "{}/storage/v1/b/{}/o/{}/copyTo/b/{}/o/{}",
+            self.base_url, self.bucket_name_encoded, source, self.bucket_name_encoded, destination
         );
 
         let mut builder = self.client.request(Method::POST, url);
@@ -264,7 +287,10 @@ impl GoogleCloudStorage {
     ) -> Result<ListResponse> {
         let token = self.get_token().await?;
 
-        let url = format!("{}/b/{}/o", BASE_URL, self.bucket_name_encoded);
+        let url = format!(
+            "{}/storage/v1/b/{}/o",
+            self.base_url, self.bucket_name_encoded
+        );
 
         let mut query = Vec::with_capacity(4);
         if delimiter {
@@ -448,12 +474,16 @@ pub fn new_gcs(
     let scope = "https://www.googleapis.com/auth/devstorage.full_control";
     let audience = "https://www.googleapis.com/oauth2/v4/token".to_string();
 
-    let oauth_provider = OAuthProvider::new(
-        credentials.client_email,
-        credentials.private_key,
-        scope.to_string(),
-        audience,
-    )?;
+    let oauth_provider = (!credentials.disable_oauth)
+        .then(|| {
+            OAuthProvider::new(
+                credentials.client_email,
+                credentials.private_key,
+                scope.to_string(),
+                audience,
+            )
+        })
+        .transpose()?;
 
     let bucket_name = bucket_name.into();
     let encoded_bucket_name = percent_encode(bucket_name.as_bytes(), NON_ALPHANUMERIC).to_string();
@@ -463,6 +493,7 @@ pub fn new_gcs(
     // that we can optionally accept command line arguments instead.
     Ok(GoogleCloudStorage {
         client,
+        base_url: credentials.gcs_base_url,
         oauth_provider,
         token_cache: Default::default(),
         bucket_name,
