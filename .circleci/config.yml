@@ -124,6 +124,28 @@ jobs:
           name: cargo-deny Checks
           command: cargo deny check -s
       - cache_save
+  check:
+    docker:
+      - image: quay.io/influxdb/rust:ci
+    environment:
+      # Disable incremental compilation to avoid overhead. We are not preserving these files anyway.
+      CARGO_INCREMENTAL: "0"
+      # Disable full debug symbol generation to speed up CI build
+      # "1" means line tables only, which is useful for panic tracebacks.
+      RUSTFLAGS: "-C debuginfo=1"
+      # https://github.com/rust-lang/cargo/issues/10280
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - checkout
+      - rust_components
+      - cache_restore
+      - run:
+          name: Install cargo-hack
+          command: cargo install cargo-hack
+      - run:
+          name: Check all features
+          command: cargo hack check --feature-powerset --no-dev-deps --workspace
+      - cache_save
   doc:
     docker:
       - image: quay.io/influxdb/rust:ci
@@ -221,6 +243,7 @@ workflows:
   # CI for all pull requests.
   ci:
     jobs:
+      - check
       - fmt
       - lint
       - cargo_audit
