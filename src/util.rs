@@ -4,7 +4,12 @@ use bytes::Bytes;
 use futures::{stream::StreamExt, Stream};
 
 /// Returns the prefix to be passed to an object store
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+#[cfg(any(
+    feature = "aws",
+    feature = "awssdk",
+    feature = "gcp",
+    feature = "azure"
+))]
 pub fn format_prefix(prefix: Option<&crate::path::Path>) -> Option<String> {
     prefix
         .filter(|x| !x.as_ref().is_empty())
@@ -13,7 +18,7 @@ pub fn format_prefix(prefix: Option<&crate::path::Path>) -> Option<String> {
 
 /// Returns a formatted HTTP range header as per
 /// <https://httpwg.org/specs/rfc7233.html#header.range>
-#[cfg(any(feature = "aws"))]
+#[cfg(any(feature = "aws", feature = "awssdk"))]
 pub fn format_http_range(range: std::ops::Range<usize>) -> String {
     format!("bytes={}-{}", range.start, range.end.saturating_sub(1))
 }

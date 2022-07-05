@@ -9,3 +9,4 @@
 massif.out.*
 valgrind-out.txt
 Cargo.lock
+**/.minio.sys
