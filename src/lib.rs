@@ -339,7 +339,7 @@ mod tests {
 
         // List with delimiter
         let result = storage.list_with_delimiter(None).await.unwrap();
-        assert!(result.objects.is_empty());
+        assert_eq!(&result.objects, &[]);
         assert_eq!(result.common_prefixes.len(), 1);
         assert_eq!(result.common_prefixes[0], Path::from("test_dir"));
 

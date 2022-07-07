@@ -177,6 +177,10 @@ jobs:
       - image: quay.io/influxdb/rust:ci
       - image: localstack/localstack
       - image: mcr.microsoft.com/azure-storage/azurite
+      - image: fsouza/fake-gcs-server
+        command:
+          - "-scheme"
+          - "http"
     resource_class: 2xlarge # use of a smaller executor tends crashes on link
     environment:
       # Disable incremental compilation to avoid overhead. We are not preserving these files anyway.
@@ -194,6 +198,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: test
       AWS_ENDPOINT: http://127.0.0.1:4566
       AZURE_USE_EMULATOR: "1"
+      GOOGLE_SERVICE_ACCOUNT: "/tmp/gcs.json"
       OBJECT_STORE_BUCKET: test-bucket
     steps:
       - run:
@@ -210,12 +215,17 @@ jobs:
           command: |
             curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
             az storage container create -n test-bucket --connection-string 'DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;'
+      - run:
+          name: Setup fake GCS server
+          command: |
+            curl -X POST --data-binary '{"name":"test-bucket"}' -H "Content-Type: application/json" "http://localhost:4443/storage/v1/b"
+            echo '{"gcs_base_url": "http://localhost:4443", "disable_oauth": true, "client_email": "", "private_key": ""}' > "$GOOGLE_SERVICE_ACCOUNT"
       - checkout
       - rust_components
       - cache_restore
       - run:
           name: Cargo test
-          command: cargo test --workspace --features=aws,azure,azure_test
+          command: cargo test --workspace --features=aws,azure,azure_test,gcp
       - cache_save
 
   test_windows:
