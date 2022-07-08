@@ -2,18 +2,18 @@
 //!
 //! ## Streaming uploads
 //!
-//! [ObjectStore::upload] will upload data in blocks and write a blob from those
+//! [ObjectStore::put_multipart] will upload data in blocks and write a blob from those
 //! blocks. Data is buffered internally to make blocks of at least 5MB and blocks
 //! are uploaded concurrently.
 //!
-//! [ObjectStore::cleanup_upload] is a no-op, since Azure Blob Store doesn't provide
+//! [ObjectStore::cleanup_multipart] is a no-op, since Azure Blob Store doesn't provide
 //! a way to drop old blocks. Instead unused blocks are automatically cleaned up
 //! after 7 days.
 use crate::{
     multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart},
     path::{Path, DELIMITER},
     util::format_prefix,
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result, UploadId,
+    GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
 use azure_core::{prelude::*, HttpClient};
@@ -100,19 +100,6 @@ enum Error {
         source,
     ))]
     UnableToPutData {
-        source: Box<dyn std::error::Error + Send + Sync>,
-        container: String,
-        path: String,
-    },
-
-    #[snafu(display(
-        "Unable to upload data. Bucket: {}, Location: {}, Error: {} ({:?})",
-        container,
-        path,
-        source,
-        source,
-    ))]
-    UnableToUploadData {
         source: Box<dyn std::error::Error + Send + Sync>,
         container: String,
         path: String,
@@ -225,10 +212,10 @@ impl ObjectStore for MicrosoftAzure {
         Ok(())
     }
 
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         let inner = AzureMultiPartUpload {
             container_client: Arc::clone(&self.container_client),
             location: location.to_owned(),
@@ -236,7 +223,7 @@ impl ObjectStore for MicrosoftAzure {
         Ok((String::new(), Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_upload(&self, _location: &Path, _upload_id: &UploadId) -> Result<()> {
+    async fn cleanup_multipart(&self, _location: &Path, _upload_id: &MultipartId) -> Result<()> {
         // There is no way to drop blocks that have been uploaded. Instead, they simply
         // expire in 7 days.
         Ok(())
@@ -590,7 +577,7 @@ impl AzureMultiPartUpload {
 }
 
 impl CloudMultiPartUploadImpl for AzureMultiPartUpload {
-    fn upload_part(
+    fn put_multipart_part(
         &self,
         buf: Vec<u8>,
         part_idx: usize,

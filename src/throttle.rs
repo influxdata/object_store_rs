@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::{convert::TryInto, sync::Arc};
 
-use crate::UploadId;
+use crate::MultipartId;
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -138,11 +138,11 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         self.inner.put(location, bytes).await
     }
 
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
-        let (upload_id, inner) = self.inner.upload(location).await?;
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
+        let (upload_id, inner) = self.inner.put_multipart(location).await?;
         Ok((
             upload_id,
             Box::new(ThrottledUpload {
@@ -153,8 +153,8 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         ))
     }
 
-    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()> {
-        self.inner.cleanup_upload(location, upload_id).await
+    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()> {
+        self.inner.cleanup_multipart(location, upload_id).await
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {

@@ -1,5 +1,5 @@
 //! An in-memory object store implementation
-use crate::UploadId;
+use crate::MultipartId;
 use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -72,10 +72,10 @@ impl ObjectStore for InMemory {
         Ok(())
     }
 
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         Ok((
             String::new(),
             Box::new(InMemoryUpload {
@@ -86,7 +86,7 @@ impl ObjectStore for InMemory {
         ))
     }
 
-    async fn cleanup_upload(&self, _location: &Path, _upload_id: &UploadId) -> Result<()> {
+    async fn cleanup_multipart(&self, _location: &Path, _upload_id: &MultipartId) -> Result<()> {
         // Nothing to clean up
         Ok(())
     }

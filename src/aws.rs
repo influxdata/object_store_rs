@@ -2,18 +2,18 @@
 //!
 //! ## Multi-part uploads
 //!
-//! Multi-part uploads can be initiated with the [ObjectStore::upload] method.
+//! Multi-part uploads can be initiated with the [ObjectStore::put_multipart] method.
 //! Data passed to the writer is automatically buffered to meet the minimum size
 //! requirements for a part. Multiple parts are uploaded concurrently.
 //!
 //! If the writer fails for any reason, you may have parts uploaded to AWS but not
-//! used that you may be charged for. Use the [ObjectStore::cleanup_upload] method
+//! used that you may be charged for. Use the [ObjectStore::cleanup_multipart] method
 //! to abort the upload and drop those unneeded parts. In addition, you may wish to
 //! consider implementing automatic clean up of unused parts that are older than one
 //! week.
 use crate::multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart};
 use crate::util::format_http_range;
-use crate::UploadId;
+use crate::MultipartId;
 use crate::{
     collect_bytes,
     path::{Path, DELIMITER},
@@ -133,13 +133,13 @@ enum Error {
     },
 
     #[snafu(display(
-        "Unable to cleanup upload data. Bucket: {}, Location: {}, Error: {} ({:?})",
+        "Unable to cleanup multipart data. Bucket: {}, Location: {}, Error: {} ({:?})",
         bucket,
         path,
         source,
         source,
     ))]
-    UnableToCleanupUploadData {
+    UnableToCleanupMultipartData {
         source: rusoto_core::RusotoError<rusoto_s3::AbortMultipartUploadError>,
         bucket: String,
         path: String,
@@ -288,10 +288,10 @@ impl ObjectStore for AmazonS3 {
         Ok(())
     }
 
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         let bucket_name = self.bucket_name.clone();
 
         let request_factory = move || rusoto_s3::CreateMultipartUploadRequest {
@@ -326,7 +326,7 @@ impl ObjectStore for AmazonS3 {
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()> {
+    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()> {
         let request_factory = move || rusoto_s3::AbortMultipartUploadRequest {
             bucket: self.bucket_name.clone(),
             key: location.to_string(),
@@ -341,7 +341,7 @@ impl ObjectStore for AmazonS3 {
             async move { s3.abort_multipart_upload(request_factory()).await }
         })
         .await
-        .context(UnableToCleanupUploadDataSnafu {
+        .context(UnableToCleanupMultipartDataSnafu {
             bucket: &self.bucket_name,
             path: location.as_ref(),
         })?;
@@ -889,7 +889,7 @@ struct S3MultiPartUpload {
 }
 
 impl CloudMultiPartUploadImpl for S3MultiPartUpload {
-    fn upload_part(
+    fn put_multipart_part(
         &self,
         buf: Vec<u8>,
         part_idx: usize,

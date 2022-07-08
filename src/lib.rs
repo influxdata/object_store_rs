@@ -41,6 +41,7 @@ mod oauth;
 #[cfg(feature = "gcp")]
 mod token;
 
+#[cfg(any(feature = "azure", feature = "aws"))]
 mod multipart;
 mod util;
 
@@ -60,7 +61,7 @@ use tokio::io::AsyncWrite;
 pub type DynObjectStore = dyn ObjectStore;
 
 /// Id type for multi-part uploads.
-pub type UploadId = String;
+pub type MultipartId = String;
 
 /// Universal API to multiple object store services.
 #[async_trait]
@@ -70,19 +71,24 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
 
     /// Get a multi-part upload that allows writing data in chunks
     ///
+    /// Most cloud-based uploads will buffer and upload parts in parallel.
+    ///
     /// To complete the upload, [AsyncWrite::poll_shutdown] must be called
     /// to completion.
     ///
     /// For some object stores (S3, GCS, and local in particular), if the
-    /// writer fails or panics, you must call [ObjectStore::cleanup_upload]
+    /// writer fails or panics, you must call [ObjectStore::cleanup_multipart]
     /// to clean up partially written data.
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)>;
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)>;
 
     /// Cleanup an aborted upload.
-    async fn cleanup_upload(&self, location: &Path, upload_id: &UploadId) -> Result<()>;
+    ///
+    /// See documentation for individual stores for exact behavior, as capabilities
+    /// vary by object store.
+    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()>;
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;
@@ -508,7 +514,7 @@ mod tests {
         // Can write to storage
         let data = get_vec_of_bytes(5_000_000, 10);
         let bytes_expected = data.concat();
-        let (_, mut writer) = storage.upload(&location).await?;
+        let (_, mut writer) = storage.put_multipart(&location).await?;
         for chunk in &data {
             writer.write_all(chunk).await?;
         }
@@ -519,7 +525,7 @@ mod tests {
         // Can overwrite some storage
         let data = get_vec_of_bytes(5_000_000, 5);
         let bytes_expected = data.concat();
-        let (_, mut writer) = storage.upload(&location).await?;
+        let (_, mut writer) = storage.put_multipart(&location).await?;
         for chunk in &data {
             writer.write_all(chunk).await?;
         }
@@ -529,9 +535,9 @@ mod tests {
 
         // We can abort an empty write
         let location = Path::from("test_dir/test_abort_upload.txt");
-        let (upload_id, writer) = storage.upload(&location).await?;
+        let (upload_id, writer) = storage.put_multipart(&location).await?;
         drop(writer);
-        storage.cleanup_upload(&location, &upload_id).await?;
+        storage.cleanup_multipart(&location, &upload_id).await?;
         let get_res = storage.get(&location).await;
         assert!(get_res.is_err());
         assert!(matches!(
@@ -540,14 +546,14 @@ mod tests {
         ));
 
         // We can abort an in-progress write
-        let (upload_id, mut writer) = storage.upload(&location).await?;
+        let (upload_id, mut writer) = storage.put_multipart(&location).await?;
         if let Some(chunk) = data.get(0) {
             writer.write_all(chunk).await?;
             let _ = writer.write(chunk).await?;
         }
         drop(writer);
 
-        storage.cleanup_upload(&location, &upload_id).await?;
+        storage.cleanup_multipart(&location, &upload_id).await?;
         let get_res = storage.get(&location).await;
         assert!(get_res.is_err());
         assert!(matches!(

@@ -2,7 +2,7 @@
 use crate::{
     maybe_spawn_blocking,
     path::{filesystem_path_to_url, Path},
-    GetResult, ListResult, ObjectMeta, ObjectStore, Result, UploadId,
+    GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Result,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -231,10 +231,10 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn upload(
+    async fn put_multipart(
         &self,
         location: &Path,
-    ) -> Result<(UploadId, Box<dyn AsyncWrite + Unpin + Send>)> {
+    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
         let path = self.config.path_to_filesystem(location)?;
 
         let file = open_writable_file(&path)?;
@@ -248,7 +248,7 @@ impl ObjectStore for LocalFileSystem {
         ))
     }
 
-    async fn cleanup_upload(&self, location: &Path, _upload_id: &UploadId) -> Result<()> {
+    async fn cleanup_multipart(&self, location: &Path, _upload_id: &MultipartId) -> Result<()> {
         // Clean up partial write
         self.delete(location)
             .map(|res| match res {

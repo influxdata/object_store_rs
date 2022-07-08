@@ -9,7 +9,11 @@ type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Sen
 // Lifetimes are difficult to manage, so not using AsyncTrait
 pub(crate) trait CloudMultiPartUploadImpl {
     /// Upload a single part
-    fn upload_part(&self, buf: Vec<u8>, part_idx: usize) -> BoxedTryFuture<(usize, UploadPart)>;
+    fn put_multipart_part(
+        &self,
+        buf: Vec<u8>,
+        part_idx: usize,
+    ) -> BoxedTryFuture<(usize, UploadPart)>;
 
     /// Complete the upload with the provided parts
     fn complete(&self, completed_parts: Vec<Option<UploadPart>>) -> BoxedTryFuture<()>;
@@ -98,7 +102,9 @@ where
             self.current_buffer.extend_from_slice(buf);
 
             let out_buffer = std::mem::take(&mut self.current_buffer);
-            let task = self.inner.upload_part(out_buffer, self.current_part_idx);
+            let task = self
+                .inner
+                .put_multipart_part(out_buffer, self.current_part_idx);
             self.tasks.push(task);
             self.current_part_idx += 1;
 
@@ -125,7 +131,9 @@ where
         // If current_buffer is not empty, see if it can be submitted
         if !self.current_buffer.is_empty() && self.tasks.len() < self.max_concurrency {
             let out_buffer: Vec<u8> = std::mem::take(&mut self.current_buffer);
-            let task = self.inner.upload_part(out_buffer, self.current_part_idx);
+            let task = self
+                .inner
+                .put_multipart_part(out_buffer, self.current_part_idx);
             self.tasks.push(task);
         }
 
