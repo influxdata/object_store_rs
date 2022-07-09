@@ -52,6 +52,7 @@ enum Error {
         source: serde_xml_rs::Error,
         method: String,
         url: String,
+        data: Bytes,
     },
 
     #[snafu(display("Error performing list request: {}", source))]
@@ -147,20 +148,20 @@ struct Object {
 }
 
 #[derive(serde::Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct InitiateMultipartUploadResult<'a> {
-    upload_id: &'a str,
+#[serde(rename_all = "PascalCase")]
+struct InitiateMultipartUploadResult {
+    upload_id: String,
 }
 
 #[derive(serde::Serialize, Debug)]
-#[serde(rename_all = "camelCase", rename(serialize = "Part"))]
+#[serde(rename_all = "PascalCase", rename(serialize = "Part"))]
 struct MultipartPart {
     part_number: usize,
     e_tag: String,
 }
 
 #[derive(serde::Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "PascalCase")]
 struct CompleteMultipartUpload {
     parts: Vec<MultipartPart>,
 }
@@ -292,13 +293,14 @@ impl GoogleCloudStorageClient {
             .context(PutRequestSnafu)?;
 
         let data = response.bytes().await.context(PutRequestSnafu)?;
-        let result: InitiateMultipartUploadResult<'_> = serde_xml_rs::from_reader(data.reader())
-            .context(InvalidXMLResponseSnafu {
+        let result: InitiateMultipartUploadResult =
+            serde_xml_rs::from_reader(data.as_ref().reader()).context(InvalidXMLResponseSnafu {
                 method: "POST".to_string(),
                 url,
+                data,
             })?;
 
-        Ok(result.upload_id.to_string())
+        Ok(result.upload_id)
     }
 
     /// Cleanup unused parts <https://cloud.google.com/storage/docs/xml-api/delete-multipart>
@@ -514,15 +516,15 @@ impl CloudMultiPartUploadImpl for GCSMultipartUpload {
                 .get_token()
                 .await
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+
             let response = client
                 .client
                 .request(Method::PUT, &url)
                 .bearer_auth(token)
-                .query(&[(
-                    "partNumber",
-                    format!("{}", part_idx),
+                .query(&[
+                    ("partNumber", format!("{}", part_idx + 1)),
                     ("uploadId", upload_id),
-                )])
+                ])
                 .header(header::CONTENT_TYPE, "application/octet-stream")
                 .header(header::CONTENT_LENGTH, format!("{}", buf.len()))
                 .body(buf)
@@ -579,8 +581,21 @@ impl CloudMultiPartUploadImpl for GCSMultipartUpload {
                 .await
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-            let data = serde_xml_rs::to_string(&parts)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            // serde_xml_rs cannot yet serialize Vec
+            // https://github.com/RReverser/serde-xml-rs/issues/135
+            // let data = serde_xml_rs::to_string(&parts)
+            //    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            let inner_data = parts
+                .into_iter()
+                .map(|part| {
+                    serde_xml_rs::to_string(&part)
+                        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+                })
+                .collect::<Result<String, io::Error>>()?;
+            let data = format!(
+                "<CompleteMultipartUpload>{}</CompleteMultipartUpload>",
+                inner_data
+            );
 
             client
                 .client
@@ -619,6 +634,8 @@ impl ObjectStore for GoogleCloudStorage {
             encoded_path,
             upload_id: upload_id.clone(),
         };
+
+        dbg!(&upload_id);
 
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
