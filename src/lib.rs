@@ -13,16 +13,13 @@
 //!
 //! This crate provides APIs for interacting with object storage services.
 //!
-//! It currently supports PUT, GET, DELETE, HEAD and list for:
+//! It currently supports PUT (single or chunked/concurrent), GET, DELETE, HEAD and list for:
 //!
 //! * [Google Cloud Storage](https://cloud.google.com/storage/)
 //! * [Amazon S3](https://aws.amazon.com/s3/)
 //! * [Azure Blob Storage](https://azure.microsoft.com/en-gb/services/storage/blobs/#overview)
 //! * In-memory
 //! * Local file storage
-//!
-//! It also supports streaming writes (multi-part upload) for all except GCS.
-//! (GCS support coming soon!)
 
 #[cfg(feature = "aws")]
 pub mod aws;
@@ -41,7 +38,7 @@ mod oauth;
 #[cfg(feature = "gcp")]
 mod token;
 
-#[cfg(any(feature = "azure", feature = "aws"))]
+#[cfg(any(feature = "azure", feature = "aws", feature = "gcp"))]
 mod multipart;
 mod util;
 

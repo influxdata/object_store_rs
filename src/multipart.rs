@@ -1,4 +1,4 @@
-use futures::{stream::FuturesUnordered, Future, StreamExt};
+use futures::{future::BoxFuture, stream::FuturesUnordered, Future, StreamExt};
 use std::{io, pin::Pin, sync::Arc, task::Poll};
 use tokio::io::AsyncWrite;
 
@@ -13,10 +13,13 @@ pub(crate) trait CloudMultiPartUploadImpl {
         &self,
         buf: Vec<u8>,
         part_idx: usize,
-    ) -> BoxedTryFuture<(usize, UploadPart)>;
+    ) -> BoxFuture<'static, Result<(usize, UploadPart), io::Error>>;
 
     /// Complete the upload with the provided parts
-    fn complete(&self, completed_parts: Vec<Option<UploadPart>>) -> BoxedTryFuture<()>;
+    fn complete(
+        &self,
+        completed_parts: Vec<Option<UploadPart>>,
+    ) -> BoxFuture<'static, Result<(), io::Error>>;
 }
 
 #[derive(Debug, Clone)]
