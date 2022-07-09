@@ -85,7 +85,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// See documentation for individual stores for exact behavior, as capabilities
     /// vary by object store.
-    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()>;
+    async fn cleanup_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()>;
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;

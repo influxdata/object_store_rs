@@ -153,8 +153,8 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         ))
     }
 
-    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()> {
-        self.inner.cleanup_multipart(location, upload_id).await
+    async fn cleanup_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
+        self.inner.cleanup_multipart(location, multipart_id).await
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {

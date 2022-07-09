@@ -326,11 +326,11 @@ impl ObjectStore for AmazonS3 {
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_multipart(&self, location: &Path, upload_id: &MultipartId) -> Result<()> {
+    async fn cleanup_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
         let request_factory = move || rusoto_s3::AbortMultipartUploadRequest {
             bucket: self.bucket_name.clone(),
             key: location.to_string(),
-            upload_id: upload_id.to_string(),
+            upload_id: multipart_id.to_string(),
             ..Default::default()
         };
 

@@ -223,7 +223,7 @@ impl ObjectStore for MicrosoftAzure {
         Ok((String::new(), Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_multipart(&self, _location: &Path, _upload_id: &MultipartId) -> Result<()> {
+    async fn cleanup_multipart(&self, _location: &Path, _multipart_id: &MultipartId) -> Result<()> {
         // There is no way to drop blocks that have been uploaded. Instead, they simply
         // expire in 7 days.
         Ok(())
@@ -557,9 +557,9 @@ pub fn new_azure(
 
 // Relevant docs: https://azure.github.io/Storage/docs/application-and-user-data/basics/azure-blob-storage-upload-apis/
 // In Azure Blob Store, parts are "blocks"
-// upload_part -> PUT block
-// complete_upload -> PUT block list
-// abort_upload -> No equivalent; blocks are simply dropped after 7 days
+// put_multipart_part -> PUT block
+// complete -> PUT block list
+// abort -> No equivalent; blocks are simply dropped after 7 days
 #[derive(Debug, Clone)]
 struct AzureMultiPartUpload {
     container_client: Arc<ContainerClient>,

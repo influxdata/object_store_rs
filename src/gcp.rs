@@ -494,7 +494,7 @@ fn reqwest_error_as_io(err: reqwest::Error) -> io::Error {
 struct GCSMultipartUpload {
     client: Arc<GoogleCloudStorageClient>,
     encoded_path: String,
-    upload_id: MultipartId,
+    multipart_id: MultipartId,
 }
 
 impl CloudMultiPartUploadImpl for GCSMultipartUpload {
@@ -504,7 +504,7 @@ impl CloudMultiPartUploadImpl for GCSMultipartUpload {
         buf: Vec<u8>,
         part_idx: usize,
     ) -> BoxFuture<'static, Result<(usize, UploadPart), io::Error>> {
-        let upload_id = self.upload_id.clone();
+        let upload_id = self.multipart_id.clone();
         let url = format!(
             "{}/{}/{}",
             self.client.base_url, self.client.bucket_name_encoded, self.encoded_path
@@ -554,7 +554,7 @@ impl CloudMultiPartUploadImpl for GCSMultipartUpload {
         completed_parts: Vec<Option<UploadPart>>,
     ) -> BoxFuture<'static, Result<(), io::Error>> {
         let client = Arc::clone(&self.client);
-        let upload_id = self.upload_id.clone();
+        let upload_id = self.multipart_id.clone();
         let url = format!(
             "{}/{}/{}",
             self.client.base_url, self.client.bucket_name_encoded, self.encoded_path
@@ -632,10 +632,8 @@ impl ObjectStore for GoogleCloudStorage {
         let inner = GCSMultipartUpload {
             client: Arc::clone(&self.client),
             encoded_path,
-            upload_id: upload_id.clone(),
+            multipart_id: upload_id.clone(),
         };
-
-        dbg!(&upload_id);
 
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
