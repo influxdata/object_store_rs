@@ -166,7 +166,7 @@ struct CompleteMultipartUpload {
     parts: Vec<MultipartPart>,
 }
 
-/// Configuration for connecting to [Google Cloud Storage](https://cloud.google.com/storage/).s
+/// Configuration for connecting to [Google Cloud Storage](https://cloud.google.com/storage/).
 #[derive(Debug)]
 pub struct GoogleCloudStorage {
     client: Arc<GoogleCloudStorageClient>,
@@ -473,8 +473,6 @@ impl GoogleCloudStorageClient {
 fn reqwest_error_as_io(err: reqwest::Error) -> io::Error {
     if err.is_builder() || err.is_request() {
         io::Error::new(io::ErrorKind::InvalidInput, err)
-    } else if err.is_redirect() {
-        io::Error::new(io::ErrorKind::ConnectionAborted, err)
     } else if err.is_status() {
         match err.status() {
             Some(StatusCode::NOT_FOUND) => io::Error::new(io::ErrorKind::NotFound, err),
@@ -867,6 +865,7 @@ mod test {
         rename_and_copy(&integration).await.unwrap();
         if integration.client.base_url == default_gcs_base_url() {
             // Fake GCS server does not yet implement XML Multipart uploads
+            // https://github.com/fsouza/fake-gcs-server/issues/852
             stream_get(&integration).await.unwrap();
         }
     }

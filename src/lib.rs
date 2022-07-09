@@ -20,6 +20,7 @@
 //! * [Azure Blob Storage](https://azure.microsoft.com/en-gb/services/storage/blobs/#overview)
 //! * In-memory
 //! * Local file storage
+//!
 
 #[cfg(feature = "aws")]
 pub mod aws;
@@ -520,7 +521,7 @@ mod tests {
         assert_eq!(bytes_expected, bytes_written);
 
         // Can overwrite some storage
-        let data = get_vec_of_bytes(5_000_000, 5);
+        let data = get_vec_of_bytes(5_000, 5);
         let bytes_expected = data.concat();
         let (_, mut writer) = storage.put_multipart(&location).await?;
         for chunk in &data {
