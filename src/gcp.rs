@@ -98,7 +98,7 @@ struct ServiceAccountCredentials {
 }
 
 fn default_gcs_base_url() -> String {
-    "https://storage.googleapis.com/storage/v1".to_owned()
+    "https://storage.googleapis.com".to_owned()
 }
 
 fn default_disable_oauth() -> bool {
