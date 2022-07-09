@@ -865,7 +865,10 @@ mod test {
         list_uses_directories_correctly(&integration).await.unwrap();
         list_with_delimiter(&integration).await.unwrap();
         rename_and_copy(&integration).await.unwrap();
-        stream_get(&integration).await.unwrap();
+        if integration.client.base_url == default_gcs_base_url() {
+            // Fake GCS server does not yet implement XML Multipart uploads
+            stream_get(&integration).await.unwrap();
+        }
     }
 
     #[tokio::test]
