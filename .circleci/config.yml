@@ -175,7 +175,7 @@ jobs:
     # setup multiple docker images (see https://circleci.com/docs/2.0/configuration-reference/#docker)
     docker:
       - image: quay.io/influxdb/rust:ci
-      - image: localstack/localstack
+      - image: localstack/localstack:0.14.4
       - image: mcr.microsoft.com/azure-storage/azurite
       - image: fsouza/fake-gcs-server
         command:
