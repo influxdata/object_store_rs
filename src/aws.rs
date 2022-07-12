@@ -17,6 +17,7 @@ use hyper::client::Builder as HyperBuilder;
 use rusoto_core::ByteStream;
 use rusoto_credential::{InstanceMetadataProvider, StaticProvider};
 use rusoto_s3::S3;
+use rusoto_sts::WebIdentityProvider;
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::ops::Range;
 use std::{convert::TryFrom, fmt, num::NonZeroUsize, ops::Deref, sync::Arc, time::Duration};
@@ -499,10 +500,10 @@ pub fn new_s3(
         }
         (None, Some(_), _) => return Err(Error::MissingAccessKey.into()),
         (Some(_), None, _) => return Err(Error::MissingSecretAccessKey.into()),
-        _ => {
-            let credentials_provider = InstanceMetadataProvider::new();
-            rusoto_s3::S3Client::new_with(http_client, credentials_provider, region)
+        _ if std::env::var_os("AWS_WEB_IDENTITY_TOKEN_FILE").is_some() => {
+            rusoto_s3::S3Client::new_with(http_client, WebIdentityProvider::from_k8s_env(), region)
         }
+        _ => rusoto_s3::S3Client::new_with(http_client, InstanceMetadataProvider::new(), region),
     };
 
     Ok(AmazonS3 {
