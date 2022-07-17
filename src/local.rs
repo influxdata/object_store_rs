@@ -248,7 +248,7 @@ impl ObjectStore for LocalFileSystem {
         ))
     }
 
-    async fn cleanup_multipart(&self, location: &Path, _multipart_id: &MultipartId) -> Result<()> {
+    async fn abort_multipart(&self, location: &Path, _multipart_id: &MultipartId) -> Result<()> {
         // Clean up partial write
         self.delete(location)
             .map(|res| match res {

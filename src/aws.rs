@@ -7,7 +7,7 @@
 //! requirements for a part. Multiple parts are uploaded concurrently.
 //!
 //! If the writer fails for any reason, you may have parts uploaded to AWS but not
-//! used that you may be charged for. Use the [ObjectStore::cleanup_multipart] method
+//! used that you may be charged for. Use the [ObjectStore::abort_multipart] method
 //! to abort the upload and drop those unneeded parts. In addition, you may wish to
 //! consider implementing [automatic cleanup] of unused parts that are older than one
 //! week.
@@ -328,7 +328,7 @@ impl ObjectStore for AmazonS3 {
         Ok((upload_id, Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
+    async fn abort_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()> {
         let request_factory = move || rusoto_s3::AbortMultipartUploadRequest {
             bucket: self.bucket_name.clone(),
             key: location.to_string(),

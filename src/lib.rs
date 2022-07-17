@@ -75,7 +75,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// to completion.
     ///
     /// For some object stores (S3, GCS, and local in particular), if the
-    /// writer fails or panics, you must call [ObjectStore::cleanup_multipart]
+    /// writer fails or panics, you must call [ObjectStore::abort_multipart]
     /// to clean up partially written data.
     async fn put_multipart(
         &self,
@@ -86,7 +86,7 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// See documentation for individual stores for exact behavior, as capabilities
     /// vary by object store.
-    async fn cleanup_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()>;
+    async fn abort_multipart(&self, location: &Path, multipart_id: &MultipartId) -> Result<()>;
 
     /// Return the bytes that are stored at the specified location.
     async fn get(&self, location: &Path) -> Result<GetResult>;
@@ -535,7 +535,7 @@ mod tests {
         let location = Path::from("test_dir/test_abort_upload.txt");
         let (upload_id, writer) = storage.put_multipart(&location).await?;
         drop(writer);
-        storage.cleanup_multipart(&location, &upload_id).await?;
+        storage.abort_multipart(&location, &upload_id).await?;
         let get_res = storage.get(&location).await;
         assert!(get_res.is_err());
         assert!(matches!(
@@ -551,7 +551,7 @@ mod tests {
         }
         drop(writer);
 
-        storage.cleanup_multipart(&location, &upload_id).await?;
+        storage.abort_multipart(&location, &upload_id).await?;
         let get_res = storage.get(&location).await;
         assert!(get_res.is_err());
         assert!(matches!(

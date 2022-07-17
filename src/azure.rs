@@ -6,7 +6,7 @@
 //! blocks. Data is buffered internally to make blocks of at least 5MB and blocks
 //! are uploaded concurrently.
 //!
-//! [ObjectStore::cleanup_multipart] is a no-op, since Azure Blob Store doesn't provide
+//! [ObjectStore::abort_multipart] is a no-op, since Azure Blob Store doesn't provide
 //! a way to drop old blocks. Instead unused blocks are automatically cleaned up
 //! after 7 days.
 use crate::{
@@ -223,7 +223,7 @@ impl ObjectStore for MicrosoftAzure {
         Ok((String::new(), Box::new(CloudMultiPartUpload::new(inner, 8))))
     }
 
-    async fn cleanup_multipart(&self, _location: &Path, _multipart_id: &MultipartId) -> Result<()> {
+    async fn abort_multipart(&self, _location: &Path, _multipart_id: &MultipartId) -> Result<()> {
         // There is no way to drop blocks that have been uploaded. Instead, they simply
         // expire in 7 days.
         Ok(())
