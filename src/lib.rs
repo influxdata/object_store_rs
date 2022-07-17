@@ -516,6 +516,15 @@ mod tests {
         for chunk in &data {
             writer.write_all(chunk).await?;
         }
+
+        // Object should not yet exist in store
+        let meta_res = storage.head(&location).await;
+        assert!(meta_res.is_err());
+        assert!(matches!(
+            meta_res.unwrap_err(),
+            crate::Error::NotFound { .. }
+        ));
+
         writer.shutdown().await?;
         let bytes_written = storage.get(&location).await?.bytes().await?;
         assert_eq!(bytes_expected, bytes_written);
