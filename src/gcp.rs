@@ -49,7 +49,7 @@ enum Error {
 
     #[snafu(display("Got invalid XML response for {} {}: {}", method, url, source))]
     InvalidXMLResponse {
-        source: serde_xml_rs::Error,
+        source: quick_xml::de::DeError,
         method: String,
         url: String,
         data: Bytes,
@@ -156,13 +156,16 @@ struct InitiateMultipartUploadResult {
 #[derive(serde::Serialize, Debug)]
 #[serde(rename_all = "PascalCase", rename(serialize = "Part"))]
 struct MultipartPart {
+    #[serde(rename = "$unflatten=PartNumber")]
     part_number: usize,
+    #[serde(rename = "$unflatten=ETag")]
     e_tag: String,
 }
 
 #[derive(serde::Serialize, Debug)]
 #[serde(rename_all = "PascalCase")]
 struct CompleteMultipartUpload {
+    #[serde(rename = "Part", default)]
     parts: Vec<MultipartPart>,
 }
 
@@ -293,12 +296,14 @@ impl GoogleCloudStorageClient {
             .context(PutRequestSnafu)?;
 
         let data = response.bytes().await.context(PutRequestSnafu)?;
-        let result: InitiateMultipartUploadResult =
-            serde_xml_rs::from_reader(data.as_ref().reader()).context(InvalidXMLResponseSnafu {
-                method: "POST".to_string(),
-                url,
-                data,
-            })?;
+        let result: InitiateMultipartUploadResult = quick_xml::de::from_reader(
+            data.as_ref().reader(),
+        )
+        .context(InvalidXMLResponseSnafu {
+            method: "POST".to_string(),
+            url,
+            data,
+        })?;
 
         Ok(result.upload_id)
     }
@@ -579,21 +584,14 @@ impl CloudMultiPartUploadImpl for GCSMultipartUpload {
                 .await
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-            // serde_xml_rs cannot yet serialize Vec
-            // https://github.com/RReverser/serde-xml-rs/issues/135
-            // let data = serde_xml_rs::to_string(&parts)
-            //    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-            let inner_data = parts
-                .into_iter()
-                .map(|part| {
-                    serde_xml_rs::to_string(&part)
-                        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-                })
-                .collect::<Result<String, io::Error>>()?;
-            let data = format!(
-                "<CompleteMultipartUpload>{}</CompleteMultipartUpload>",
-                inner_data
-            );
+            let upload_info = CompleteMultipartUpload { parts };
+
+            let data = quick_xml::se::to_string(&upload_info)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?
+                // We cannot disable the escaping that transforms "/" to "&quote;" :(
+                // https://github.com/tafia/quick-xml/issues/362
+                // https://github.com/tafia/quick-xml/issues/350
+                .replace("&quot;", "\"");
 
             client
                 .client

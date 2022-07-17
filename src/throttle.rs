@@ -1,4 +1,5 @@
 //! A throttling object store wrapper
+use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use std::io;
 use std::ops::Range;
