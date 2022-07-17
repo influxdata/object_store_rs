@@ -6,7 +6,11 @@ use crate::Result;
 
 type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Send>>;
 
-// Lifetimes are difficult to manage, so not using AsyncTrait
+/// A trait that can be implemented by cloud-based object stores
+/// and used in combination with [`CloudMultiPartUpload`] to provide
+/// multipart upload support
+///
+/// Note: this does not use AsyncTrait as the lifetimes are difficult to manage
 pub(crate) trait CloudMultiPartUploadImpl {
     /// Upload a single part
     fn put_multipart_part(
@@ -16,6 +20,8 @@ pub(crate) trait CloudMultiPartUploadImpl {
     ) -> BoxFuture<'static, Result<(usize, UploadPart), io::Error>>;
 
     /// Complete the upload with the provided parts
+    ///
+    /// `completed_parts` is in order of part number
     fn complete(
         &self,
         completed_parts: Vec<Option<UploadPart>>,

@@ -261,7 +261,7 @@ fn usize_to_u32_saturate(x: usize) -> u32 {
 
 enum ThrottledUploadState {
     Idle,
-    Sleeping(Pin<Box<dyn Future<Output = ()> + Send>>),
+    Sleeping(BoxFuture<'static, ()>),
     Waiting,
 }
 

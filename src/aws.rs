@@ -9,8 +9,10 @@
 //! If the writer fails for any reason, you may have parts uploaded to AWS but not
 //! used that you may be charged for. Use the [ObjectStore::cleanup_multipart] method
 //! to abort the upload and drop those unneeded parts. In addition, you may wish to
-//! consider implementing automatic clean up of unused parts that are older than one
+//! consider implementing [automatic cleanup] of unused parts that are older than one
 //! week.
+//!
+//! [automatic cleanup]: https://aws.amazon.com/blogs/aws/s3-lifecycle-management-update-support-for-multipart-uploads-and-delete-markers/
 use crate::multipart::{CloudMultiPartUpload, CloudMultiPartUploadImpl, UploadPart};
 use crate::util::format_http_range;
 use crate::MultipartId;
@@ -915,8 +917,7 @@ impl CloudMultiPartUploadImpl for S3MultiPartUpload {
         let connection_semaphore = Arc::clone(&self.connection_semaphore);
 
         Box::pin(async move {
-            #[allow(unused_variables)]
-            let permit = connection_semaphore
+            let _permit = connection_semaphore
                 .acquire_owned()
                 .await
                 .expect("semaphore shouldn't be closed yet");
@@ -980,8 +981,7 @@ impl CloudMultiPartUploadImpl for S3MultiPartUpload {
         let connection_semaphore = Arc::clone(&self.connection_semaphore);
 
         Box::pin(async move {
-            #[allow(unused_variables)]
-            let permit = connection_semaphore
+            let _permit = connection_semaphore
                 .acquire_owned()
                 .await
                 .expect("semaphore shouldn't be closed yet");
