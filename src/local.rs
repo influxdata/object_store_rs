@@ -256,12 +256,7 @@ impl ObjectStore for LocalFileSystem {
 
         Ok((
             multipart_id.clone(),
-            Box::new(LocalUpload {
-                inner_state: LocalUploadState::Idle,
-                multipart_id,
-                dest,
-                file: Arc::new(file),
-            }),
+            Box::new(LocalUpload::new(dest, multipart_id, Arc::new(file))),
         ))
     }
 
@@ -506,16 +501,37 @@ fn get_upload_stage_path(dest: &std::path::Path, multipart_id: &MultipartId) -> 
 }
 
 enum LocalUploadState {
-    Idle,
-    Writing(BoxFuture<'static, Result<usize, io::Error>>),
+    /// Upload is ready to send new data
+    Idle(Arc<std::fs::File>),
+    /// In the middle of a write
+    Writing(
+        Arc<std::fs::File>,
+        BoxFuture<'static, Result<usize, io::Error>>,
+    ),
+    /// In the middle of syncing data and closing file.
+    ///
+    /// Future will contain last reference to file, so it will call drop on completion.
+    ShuttingDown(BoxFuture<'static, Result<(), io::Error>>),
+    /// File is being moved from it's temporary location to the final location
     Committing(BoxFuture<'static, Result<(), io::Error>>),
+    /// Upload is complete
+    Complete,
 }
 
 struct LocalUpload {
     inner_state: LocalUploadState,
     dest: PathBuf,
     multipart_id: MultipartId,
-    file: Arc<std::fs::File>,
+}
+
+impl LocalUpload {
+    pub fn new(dest: PathBuf, multipart_id: MultipartId, file: Arc<std::fs::File>) -> Self {
+        Self {
+            inner_state: LocalUploadState::Idle(file),
+            dest,
+            multipart_id,
+        }
+    }
 }
 
 impl AsyncWrite for LocalUpload {
@@ -524,42 +540,64 @@ impl AsyncWrite for LocalUpload {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, io::Error>> {
-        let file = Arc::clone(&self.file);
+        let invalid_state = |condition: &str| -> std::task::Poll<Result<usize, io::Error>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Tried to write to file {}.", condition),
+            )))
+        };
+
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let data: Vec<u8> = buf.to_vec();
+            let mut data: Vec<u8> = buf.to_vec();
             let data_len = data.len();
 
-            if let LocalUploadState::Idle = &mut self.inner_state {
-                self.inner_state = LocalUploadState::Writing(Box::pin(
-                    runtime
-                        .spawn_blocking(move || (&*file).write_all(&data))
-                        .map(move |res| match res {
-                            Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
-                            Ok(res) => res.map(move |_| data_len),
-                        }),
-                ));
-            }
-            let inner_write = match &mut self.inner_state {
-                LocalUploadState::Writing(write) => write,
-                LocalUploadState::Committing(_) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Tried to write to file where a commit is already in progress.",
-                    )));
+            loop {
+                match &mut self.inner_state {
+                    LocalUploadState::Idle(file) => {
+                        let file = Arc::clone(file);
+                        let file2 = Arc::clone(&file);
+                        let data: Vec<u8> = std::mem::take(&mut data);
+                        self.inner_state = LocalUploadState::Writing(
+                            file,
+                            Box::pin(
+                                runtime
+                                    .spawn_blocking(move || (&*file2).write_all(&data))
+                                    .map(move |res| match res {
+                                        Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
+                                        Ok(res) => res.map(move |_| data_len),
+                                    }),
+                            ),
+                        );
+                    }
+                    LocalUploadState::Writing(file, inner_write) => {
+                        match inner_write.poll_unpin(cx) {
+                            Poll::Ready(res) => {
+                                self.inner_state = LocalUploadState::Idle(Arc::clone(file));
+                                return Poll::Ready(res);
+                            }
+                            Poll::Pending => {
+                                return Poll::Pending;
+                            }
+                        }
+                    }
+                    LocalUploadState::ShuttingDown(_) => {
+                        return invalid_state("when writer is shutting down");
+                    }
+                    LocalUploadState::Committing(_) => {
+                        return invalid_state("when writer is committing data");
+                    }
+                    LocalUploadState::Complete => {
+                        return invalid_state("when writer is complete");
+                    }
                 }
-                LocalUploadState::Idle => unreachable!(),
-            };
-
-            match inner_write.poll_unpin(cx) {
-                Poll::Ready(res) => {
-                    self.inner_state = LocalUploadState::Idle;
-                    Poll::Ready(res)
-                }
-                Poll::Pending => Poll::Pending,
             }
-        } else {
+        } else if let LocalUploadState::Idle(file) = &self.inner_state {
+            let file = Arc::clone(file);
             (&*file).write_all(buf)?;
             Poll::Ready(Ok(buf.len()))
+        } else {
+            // If we are running on this thread, then only possible states are Idle and Complete.
+            invalid_state("when writer is already complete.")
         }
     }
 
@@ -574,42 +612,80 @@ impl AsyncWrite for LocalUpload {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), io::Error>> {
-        let staging_path = get_upload_stage_path(&self.dest, &self.multipart_id);
-        let dest = self.dest.clone();
-
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            if let LocalUploadState::Idle = &mut self.inner_state {
-                self.inner_state = LocalUploadState::Committing(Box::pin(
-                    runtime
-                        .spawn_blocking(move || std::fs::rename(&staging_path, &dest))
-                        .map(move |res| match res {
-                            Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
-                            Ok(res) => res,
-                        }),
-                ));
-            };
-
-            let inner_fut = match &mut self.inner_state {
-                LocalUploadState::Writing(_) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Tried to commit a file where a write is in progress.",
-                    )));
+            loop {
+                match &mut self.inner_state {
+                    LocalUploadState::Idle(file) => {
+                        // We are moving file into the future, and it will be dropped on it's completion, closing the file.
+                        let file = Arc::clone(file);
+                        self.inner_state = LocalUploadState::ShuttingDown(Box::pin(
+                            runtime
+                                .spawn_blocking(move || (*file).sync_all())
+                                .map(move |res| match res {
+                                    Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
+                                    Ok(res) => res,
+                                }),
+                        ));
+                    }
+                    LocalUploadState::ShuttingDown(fut) => match fut.poll_unpin(cx) {
+                        Poll::Ready(res) => {
+                            res?;
+                            let staging_path =
+                                get_upload_stage_path(&self.dest, &self.multipart_id);
+                            let dest = self.dest.clone();
+                            self.inner_state = LocalUploadState::Committing(Box::pin(
+                                runtime
+                                    .spawn_blocking(move || std::fs::rename(&staging_path, &dest))
+                                    .map(move |res| match res {
+                                        Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
+                                        Ok(res) => res,
+                                    }),
+                            ));
+                        }
+                        Poll::Pending => {
+                            return Poll::Pending;
+                        }
+                    },
+                    LocalUploadState::Writing(_, _) => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Tried to commit a file where a write is in progress.",
+                        )));
+                    }
+                    LocalUploadState::Committing(fut) => match fut.poll_unpin(cx) {
+                        Poll::Ready(res) => {
+                            self.inner_state = LocalUploadState::Complete;
+                            return Poll::Ready(res);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    },
+                    LocalUploadState::Complete => {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            "Already complete",
+                        )))
+                    }
                 }
-                LocalUploadState::Committing(fut) => fut,
-                LocalUploadState::Idle => unreachable!(),
-            };
-
-            match inner_fut.poll_unpin(cx) {
-                Poll::Ready(_) => {
-                    self.inner_state = LocalUploadState::Idle;
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Pending => Poll::Pending,
             }
         } else {
-            std::fs::rename(&staging_path, &self.dest)?;
-            Poll::Ready(Ok(()))
+            let staging_path = get_upload_stage_path(&self.dest, &self.multipart_id);
+            match &mut self.inner_state {
+                LocalUploadState::Idle(file) => {
+                    let file = Arc::clone(file);
+                    self.inner_state = LocalUploadState::Complete;
+                    file.sync_all()?;
+                    std::mem::drop(file);
+                    std::fs::rename(&staging_path, &self.dest)?;
+                    Poll::Ready(Ok(()))
+                }
+                _ => {
+                    // If we are running on this thread, then only possible states are Idle and Complete.
+                    Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Already complete",
+                    )))
+                }
+            }
         }
     }
 }
