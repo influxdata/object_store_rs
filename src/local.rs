@@ -1028,14 +1028,14 @@ mod tests {
         let list = flatten_list_stream(&integration, None).await.unwrap();
         assert_eq!(list.len(), 0);
 
-        let list: Vec<Path> = integration
-            .list_with_delimiter(None)
-            .await
-            .unwrap()
-            .objects
-            .into_iter()
-            .map(|entry| entry.location)
-            .collect();
-        assert_eq!(list.len(), 0);
+        assert_eq!(
+            integration
+                .list_with_delimiter(None)
+                .await
+                .unwrap()
+                .objects
+                .len(),
+            0
+        );
     }
 }
