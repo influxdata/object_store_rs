@@ -5,11 +5,7 @@ edition = "2021"
 license = "MIT/Apache-2.0"
 readme = "README.md"
 description = "A generic object store interface"
-keywords = [
-    "object",
-    "storage",
-    "cloud",
-]
+keywords = ["object", "storage", "cloud"]
 repository = "https://github.com/influxdata/object_store_rs"
 
 [package.metadata.docs.rs]
@@ -18,9 +14,9 @@ all-features = true
 [dependencies] # In alphabetical order
 async-trait = "0.1.53"
 # Microsoft Azure Blob storage integration
-azure_core = { version = "0.2", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
-azure_storage = { version = "0.2", optional = true, default-features = false, features = ["account"] }
-azure_storage_blobs = { version = "0.2", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
+azure_core = { version = "0.3", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
+azure_storage = { version = "0.4", optional = true, default-features = false, features = ["account"] }
+azure_storage_blobs = { version = "0.4", optional = true, default-features = false, features = ["enable_reqwest_rustls"] }
 bytes = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Google Cloud Storage integration
